@@ -1,0 +1,8 @@
+﻿python : C:\Users\user\AppData\Local\Programs\Python\Python312\python.exe: can't open file 'C:\\Users\\user\\gaia-agent\\src\\diag_eval.py': [Errno 2] No such file or 
+directory
+At line:1 char:1
++ python diag_eval.py *>&1 | Out-File -Encoding utf8 huggingface_output ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\user\A...le or directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

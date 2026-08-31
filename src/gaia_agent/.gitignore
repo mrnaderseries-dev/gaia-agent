@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments & Virtual environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Environment Variables & API Keys (Crucial for security)
+.env
+.env.local
+.env.development
+.env.test
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Evaluation & Benchmark outputs (GAIA artifacts)
+*.jsonl
+outputs/
+results/
+logs/
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db

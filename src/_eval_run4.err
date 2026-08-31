@@ -1,0 +1,24 @@
+Repaired unknown tool name 'analyze_text' -> 'analyze_image'.
+Initial planner generation or validation failed: Tool 'analyze_image' requires argument 'image_path'.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 325, in _validate_step
+    ToolContractValidator.validate_step_contract(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 72, in validate_step_contract
+    return ToolContractValidator.validate_arguments(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 113, in validate_arguments
+    raise ToolArgumentError(
+gaia_agent.reliability.exception.ToolArgumentError: Tool 'analyze_image' requires argument 'image_path'.
+Initial planner generation or validation failed: Unknown or unavailable tool: final_answer
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 303, in _validate_step
+    raise ValueError(
+ValueError: Unknown or unavailable tool: final_answer

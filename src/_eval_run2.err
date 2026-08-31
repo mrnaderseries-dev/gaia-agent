@@ -1,0 +1,179 @@
+Initial planner generation or validation failed: Tool 'analyze_excel' requires argument 'question'.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 325, in _validate_step
+    ToolContractValidator.validate_step_contract(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 72, in validate_step_contract
+    return ToolContractValidator.validate_arguments(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 113, in validate_arguments
+    raise ToolArgumentError(
+gaia_agent.reliability.exception.ToolArgumentError: Tool 'analyze_excel' requires argument 'question'.
+Initial planner generation or validation failed: Unknown or unavailable tool: llm
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 303, in _validate_step
+    raise ValueError(
+ValueError: Unknown or unavailable tool: llm
+Initial planner generation or validation failed: Unknown or unavailable tool: inspect
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 303, in _validate_step
+    raise ValueError(
+ValueError: Unknown or unavailable tool: inspect
+Triggering full replan after failure at step 1: The same execution was repeated repeatedly.
+Planner generation or validation failed during replan: Replanned strategy repeats the previously failed execution.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 191, in replan
+    self._validate_generated_plan(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 245, in _validate_generated_plan
+    raise PlannerRecoveryRequired(
+gaia_agent.planner.planner.PlannerRecoveryRequired: Replanned strategy repeats the previously failed execution.
+Initial planner generation or validation failed: Unknown or unavailable tool: inspect
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 303, in _validate_step
+    raise ValueError(
+ValueError: Unknown or unavailable tool: inspect
+Triggering full replan after failure at step 1: The same execution was repeated repeatedly.
+Planner generation or validation failed during replan: Tool 'analyze_image' requires argument 'question'.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 191, in replan
+    self._validate_generated_plan(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 325, in _validate_step
+    ToolContractValidator.validate_step_contract(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 72, in validate_step_contract
+    return ToolContractValidator.validate_arguments(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 113, in validate_arguments
+    raise ToolArgumentError(
+gaia_agent.reliability.exception.ToolArgumentError: Tool 'analyze_image' requires argument 'question'.
+Initial planner generation or validation failed: Unknown or unavailable tool: extract
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 303, in _validate_step
+    raise ValueError(
+ValueError: Unknown or unavailable tool: extract
+Triggering full replan after failure at step 1: The same execution was repeated repeatedly.
+Planner generation or validation failed during replan: Replanned strategy repeats the previously failed execution.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 191, in replan
+    self._validate_generated_plan(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 245, in _validate_generated_plan
+    raise PlannerRecoveryRequired(
+gaia_agent.planner.planner.PlannerRecoveryRequired: Replanned strategy repeats the previously failed execution.
+Initial planner generation or validation failed: Tool 'analyze_image' requires argument 'question'.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 325, in _validate_step
+    ToolContractValidator.validate_step_contract(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 72, in validate_step_contract
+    return ToolContractValidator.validate_arguments(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 113, in validate_arguments
+    raise ToolArgumentError(
+gaia_agent.reliability.exception.ToolArgumentError: Tool 'analyze_image' requires argument 'question'.
+Triggering full replan after failure at step 1: The same execution was repeated repeatedly.
+Planner generation or validation failed during replan: Tool 'analyze_image' requires argument 'question'.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 191, in replan
+    self._validate_generated_plan(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 325, in _validate_step
+    ToolContractValidator.validate_step_contract(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 72, in validate_step_contract
+    return ToolContractValidator.validate_arguments(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 113, in validate_arguments
+    raise ToolArgumentError(
+gaia_agent.reliability.exception.ToolArgumentError: Tool 'analyze_image' requires argument 'question'.
+Repaired unknown tool name 'analyze_video' -> 'analyze_image'.
+Initial planner generation or validation failed: Tool 'analyze_image' requires argument 'image_path'.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 325, in _validate_step
+    ToolContractValidator.validate_step_contract(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 72, in validate_step_contract
+    return ToolContractValidator.validate_arguments(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\user\gaia-agent\src\gaia_agent\tools\contract_validator.py", line 113, in validate_arguments
+    raise ToolArgumentError(
+gaia_agent.reliability.exception.ToolArgumentError: Tool 'analyze_image' requires argument 'image_path'.
+Triggering full replan after failure at step 1: The same execution was repeated repeatedly.
+Planner generation or validation failed during replan: Replanned strategy repeats the previously failed execution.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 191, in replan
+    self._validate_generated_plan(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 245, in _validate_generated_plan
+    raise PlannerRecoveryRequired(
+gaia_agent.planner.planner.PlannerRecoveryRequired: Replanned strategy repeats the previously failed execution.
+Triggering full replan after failure at step 4: The same execution was repeated repeatedly.
+Planner generation or validation failed during replan: LLM step cannot contain tool arguments.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 191, in replan
+    self._validate_generated_plan(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 335, in _validate_step
+    raise ValueError(
+ValueError: LLM step cannot contain tool arguments.
+Initial planner generation or validation failed: Unknown or unavailable tool: extract
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 303, in _validate_step
+    raise ValueError(
+ValueError: Unknown or unavailable tool: extract
+Triggering full replan after failure at step 1: The same execution was repeated repeatedly.
+Planner generation or validation failed during replan: Unknown or unavailable tool: extract
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 191, in replan
+    self._validate_generated_plan(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 303, in _validate_step
+    raise ValueError(
+ValueError: Unknown or unavailable tool: extract
+Initial planner generation or validation failed: LLM step cannot contain tool arguments.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 77, in create_plan
+    self._validate_generated_plan(plan)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 223, in _validate_generated_plan
+    self._validate_step(step)
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 335, in _validate_step
+    raise ValueError(
+ValueError: LLM step cannot contain tool arguments.
+Triggering full replan after failure at step 1: The same execution was repeated repeatedly.
+Planner generation or validation failed during replan: Replanned strategy repeats the previously failed execution.
+Traceback (most recent call last):
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 191, in replan
+    self._validate_generated_plan(
+  File "c:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 245, in _validate_generated_plan
+    raise PlannerRecoveryRequired(
+gaia_agent.planner.planner.PlannerRecoveryRequired: Replanned strategy repeats the previously failed execution.

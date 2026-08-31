@@ -1,0 +1,8 @@
+﻿python : C:\Users\user\AppData\Local\Programs\Python\Python312\python.exe: can't open file 'C:\\Users\\user\\gaia-agent\\src\\gaia_agent\\run_evaluation.py': [Errno 2] 
+No such file or directory
+At line:1 char:1
++ python run_evaluation.py *>&1 | Out-File -Encoding utf8 evaluation_ou ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Users\user\A...le or directory:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

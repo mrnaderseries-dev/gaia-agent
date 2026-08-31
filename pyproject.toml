@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaia-agent"
+version = "0.1.0"
+description = "GAIA AI Agent"
+requires-python = ">=3.12"
+dependencies = [
+    "asyncpg",
+    "pydantic",
+    "pydantic-settings",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

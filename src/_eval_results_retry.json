@@ -1,0 +1,40 @@
+[
+  {
+    "answer": "1",
+    "elapsed_s": 162.5,
+    "termination_reason": "TerminationReason.COMPLETED",
+    "final_answer_ready": true,
+    "final_answer_verified": true,
+    "task_completed": true,
+    "execution_success": true,
+    "blocked": false,
+    "iterations": 5,
+    "last_tool_error": null,
+    "replan_count": 0,
+    "error": null,
+    "task_id": "8e867cd7-cff9-4e6c-867a-ff5ddc2550be",
+    "index": 1,
+    "question": "How many studio albums were published by Mercedes Sosa between 2000 and 2009 (included)? You can use the latest 2022 version of english wikipedia.",
+    "file_name": "",
+    "attachment_staged": false
+  },
+  {
+    "answer": "reverse",
+    "elapsed_s": 298.6,
+    "termination_reason": "TerminationReason.COMPLETED",
+    "final_answer_ready": true,
+    "final_answer_verified": true,
+    "task_completed": true,
+    "execution_success": true,
+    "blocked": false,
+    "iterations": 3,
+    "last_tool_error": null,
+    "replan_count": 0,
+    "error": null,
+    "task_id": "2d83110e-a098-4ebb-9987-066c06fa42d0",
+    "index": 3,
+    "question": ".rewsna eht sa \"tfel\" drow eht fo etisoppo eht etirw ,ecnetnes siht dnatsrednu uoy fI",
+    "file_name": "",
+    "attachment_staged": false
+  }
+]

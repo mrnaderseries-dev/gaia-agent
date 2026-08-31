@@ -1,0 +1,145 @@
+{
+  "saved_at": "2026-08-29T09:41:32+00:00",
+  "questions": [
+    {
+      "task_id": "diag-fallback-01",
+      "question": "What is the chemical symbol for the element with atomic number 79?",
+      "level": 1,
+      "final_answer": "Au",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-02",
+      "question": "What is the capital city of Australia?",
+      "level": 1,
+      "final_answer": "Canberra",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-03",
+      "question": "Who was the first person to walk on the Moon? Give the full name.",
+      "level": 1,
+      "final_answer": "Neil Armstrong",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-04",
+      "question": "What is the largest planet in our solar system?",
+      "level": 1,
+      "final_answer": "Jupiter",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-05",
+      "question": "In which year did the Berlin Wall fall?",
+      "level": 1,
+      "final_answer": "1989",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-06",
+      "question": "What is the largest ocean on Earth?",
+      "level": 1,
+      "final_answer": "Pacific",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-07",
+      "question": "How many bones are there in the adult human body?",
+      "level": 2,
+      "final_answer": "206",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-08",
+      "question": "A train travels 360 kilometers in 4 hours. What is its average speed in km/h?",
+      "level": 1,
+      "final_answer": "90",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-09",
+      "question": "What is 2 raised to the power of 10?",
+      "level": 1,
+      "final_answer": "1024",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-10",
+      "question": "What is the sum of the interior angles of a triangle, in degrees?",
+      "level": 1,
+      "final_answer": "180",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-11",
+      "question": "In which year did World War II end?",
+      "level": 1,
+      "final_answer": "1945",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-12",
+      "question": "What is the chemical formula for water?",
+      "level": 1,
+      "final_answer": "H2O",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-13",
+      "question": "How many elements are in the periodic table as of 2023?",
+      "level": 2,
+      "final_answer": "118",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-14",
+      "question": "Which gas makes up approximately 78% of Earth's atmosphere?",
+      "level": 1,
+      "final_answer": "Nitrogen",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-15",
+      "question": "What is the tallest mountain above sea level on Earth?",
+      "level": 1,
+      "final_answer": "Mount Everest",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-16",
+      "question": "How many strings does a standard violin have?",
+      "level": 1,
+      "final_answer": "4",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-17",
+      "question": "What is the capital city of Canada?",
+      "level": 1,
+      "final_answer": "Ottawa",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-18",
+      "question": "Who wrote the play 'Romeo and Juliet'? Give the full name.",
+      "level": 1,
+      "final_answer": "William Shakespeare",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-19",
+      "question": "What is the smallest prime number?",
+      "level": 1,
+      "final_answer": "2",
+      "file_name": null
+    },
+    {
+      "task_id": "diag-fallback-20",
+      "question": "What is the value of 15 factorial divided by 13 factorial?",
+      "level": 2,
+      "final_answer": "210",
+      "file_name": null
+    }
+  ]
+}
