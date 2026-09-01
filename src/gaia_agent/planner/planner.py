@@ -168,7 +168,7 @@ class Planner:
         available_tools: dict[str, Any] | list[Any],
         loop_detector: LoopDetector | None = None,
         available_files: Sequence[str] | None = None,
-        base_dir: str = ".",
+        base_dir: str = "."
     ) -> None:
         if client is None:
             raise ValueError("client cannot be None.")
