@@ -36,17 +36,12 @@ from gaia_agent.observability.metrics import Metrics
 from gaia_agent.observability.tracer import Tracer
 
 
-# Bounded recovery limits (Phase 6).
-#
-# A previous attempt that produced no new information must NOT be
-# repeated. These limits make the replan budget explicit.
+
 MAX_REPLANS = 2
 MAX_SAME_FAILURE = 1
 MAX_SAME_PLAN = 1
 
-# Bounded semantic verification (Phase 7): after this many failed
-# verification attempts the answer is delivered honestly as
-# UNVERIFIED instead of looping regenerate -> verify -> replan.
+
 MAX_VERIFICATION_ATTEMPTS = 2
 
 logger = logging.getLogger(__name__)
@@ -82,8 +77,7 @@ class Orchestrator:
         self.state: AgentState | None = None
         self.correlation_id: UUID = uuid4()
         
-        # P0.3: execution-level loop prevention.
-        # Stores fingerprints of executions that have already been attempted.
+
         self.execution_history: set[str] = set()
 
     def bind_state(
@@ -223,8 +217,6 @@ class Orchestrator:
                 return
 
             self._prepare_step(step)
-
-            # تسجيل الـ execution فعلياً قبل التنفيذ لمنع التكرار
             self._record_execution(step)
 
             result = await self.reliability_engine.execute(
@@ -234,19 +226,6 @@ class Orchestrator:
                 validator=self._validate_execution_result,
                 recovery_operation=self._recover_execution,
             )
-
-            print("\n=== EXECUTION RESULT ===")
-            print("step_success:", result.success)
-            print("recovery_attempted:", result.recovery_attempted)
-            print("step_succeeded:", state.step_succeeded)
-            print("task_completed:", state.task_completed)
-            print("result:", result.result)
-            print("error:", result.error)
-            print("reason:", result.reason)
-            print("current_step:", state.current_step)
-            print("tool_result:", state.tool_result)
-            print("tool_error:", state.tool_error)
-            print("final_answer:", state.final_answer)
 
             if result.recovery_attempted:
                 await self._handle_execution_recovery(result)
@@ -632,12 +611,6 @@ class Orchestrator:
         step_a: PlanStep | None,
         step_b: PlanStep | None,
     ) -> bool:
-        """
-        True when two steps represent the SAME execution (same tool
-        with equivalent arguments, or the same LLM action). Wording
-        differences in the action text do not make a tool call
-        meaningfully different.
-        """
         if step_a is None or step_b is None:
             return False
 
@@ -683,11 +656,6 @@ class Orchestrator:
         failed_step: PlanStep,
         error: AgentError,
     ) -> PlanStep | None:
-        """
-        Deterministically pick a MEANINGFULLY DIFFERENT strategy after
-        a repeated failure, checking history for alternatives A and B:
-        replan A -> seen -> reject -> alternative B -> seen -> reject -> STOP.
-        """
         state = self._require_state()
 
         alternative = self.planner.get_alternative_strategy(
@@ -1236,16 +1204,21 @@ class Orchestrator:
             >= MAX_VERIFICATION_ATTEMPTS
         ):
             state.final_answer_ready = True
-            state.task_completed = True
-            state.tool_error = None
+            state.final_answer_verified = False
+            state.task_completed = False
+
+            state.tool_error = (
+                "Verification attempts exhausted; "
+                "final answer remains unverified."
+            )
 
             self.metrics.increment(
-                "answers_accepted_unverified"
+                "answers_unverified"
             )
 
             logger.warning(
                 "Verification attempts exhausted (%d); "
-                "accepting final answer unverified.",
+                "final answer remains UNVERIFIED.",
                 state.verification_attempts,
             )
 
