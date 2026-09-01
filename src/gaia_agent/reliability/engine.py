@@ -14,7 +14,9 @@ from gaia_agent.reliability.policies.retry_policy import RetryPolicy
 from gaia_agent.reliability.recovery import Recovery
 from gaia_agent.reliability.retry import Retry
 
+
 T = TypeVar("T")
+
 
 @dataclass(frozen=True, slots=True)
 class ReliabilityResult(Generic[T]):
@@ -25,6 +27,7 @@ class ReliabilityResult(Generic[T]):
     recovery_attempted: bool = False
     recovery_count: int = 0
     reason: str = ""
+
 
 class ReliabilityEngine:
     def __init__(
@@ -39,6 +42,11 @@ class ReliabilityEngine:
         max_recoveries: int = 2,
         max_total_executions: int | None = None,
     ) -> None:
+        if not isinstance(max_recoveries, int) or isinstance(
+            max_recoveries, bool
+        ):
+            raise TypeError("max_recoveries must be an integer.")
+
         if max_recoveries < 0:
             raise ValueError(
                 "max_recoveries cannot be negative."
@@ -52,16 +60,26 @@ class ReliabilityEngine:
         self.recovery = recovery
         self.max_recoveries = max_recoveries
 
-        self.max_total_executions = (
-            max_total_executions
-            if max_total_executions is not None
-            else retry_policy.max_attempts + max_recoveries
-        )
+        if max_total_executions is None:
+            max_total_executions = (
+                retry_policy.max_attempts
+                * (max_recoveries + 1)
+            )
 
-        if self.max_total_executions <= 0:
+        if (
+            not isinstance(max_total_executions, int)
+            or isinstance(max_total_executions, bool)
+        ):
+            raise TypeError(
+                "max_total_executions must be an integer."
+            )
+
+        if max_total_executions <= 0:
             raise ValueError(
                 "max_total_executions must be greater than 0."
             )
+
+        self.max_total_executions = max_total_executions
 
     async def _execute_recovery(
         self,
@@ -69,12 +87,14 @@ class ReliabilityEngine:
         error: AgentError | None,
         attempts: int,
         recovery_count: int,
-        recovery_operation: Callable[[AgentError], Awaitable[Any]] | None,
-        recovery_change_detector: Callable[[Any], bool] | None,
+        recovery_operation: (
+            Callable[[AgentError], Awaitable[Any]] | None
+        ),
+        recovery_change_detector: (
+            Callable[[Any], bool] | None
+        ),
     ) -> tuple[bool, ReliabilityResult[T] | None]:
-        """Helper to handle recovery execution and validation.
-        Returns (should_continue_loop, error_or_success_result).
-        """
+
         if recovery_operation is None:
             return False, ReliabilityResult(
                 success=False,
@@ -82,19 +102,35 @@ class ReliabilityEngine:
                 attempts=attempts,
                 recovery_attempted=recovery_count > 0,
                 recovery_count=recovery_count,
-                reason="Retry budget exhausted and no recovery operation is available.",
+                reason=(
+                    "Retry budget exhausted and no "
+                    "recovery operation is available."
+                ),
             )
 
         if error is None:
             return False, ReliabilityResult(
                 success=False,
                 attempts=attempts,
-                recovery_attempted=False,
+                recovery_attempted=recovery_count > 0,
                 recovery_count=recovery_count,
                 reason="Recovery requested without a failure.",
             )
 
-        recovery_count += 1
+        # A recovery is only safe when we can verify that
+        # it produced a meaningful change.
+        if recovery_change_detector is None:
+            return False, ReliabilityResult(
+                success=False,
+                error=error,
+                attempts=attempts,
+                recovery_attempted=recovery_count > 0,
+                recovery_count=recovery_count,
+                reason=(
+                    "Recovery operation requires a change detector. "
+                    "Replanning cannot be verified safely."
+                ),
+            )
 
         recovery_result = await self.recovery.execute(
             error=error,
@@ -109,19 +145,9 @@ class ReliabilityEngine:
                 attempts=attempts,
                 recovery_attempted=True,
                 recovery_count=recovery_count,
-                reason=recovery_result.reason or "Recovery failed.",
-            )
-
-        if recovery_change_detector is None:
-            return False, ReliabilityResult(
-                success=False,
-                error=error,
-                attempts=attempts,
-                recovery_attempted=True,
-                recovery_count=recovery_count,
                 reason=(
-                    "Recovery succeeded but no change detector was provided. "
-                    "Replanning cannot be verified safely."
+                    recovery_result.reason
+                    or "Recovery failed."
                 ),
             )
 
@@ -166,7 +192,8 @@ class ReliabilityEngine:
         if retry_budget <= 0:
             raise ValueError(
                 "max_attempts must be greater than 0."
-)
+            )
+
         if not isinstance(recovery_budget, int) or isinstance(
             recovery_budget, bool
         ):
@@ -188,15 +215,30 @@ class ReliabilityEngine:
         while attempts < self.max_total_executions:
 
             if attempts_since_recovery >= retry_budget:
+
                 if recovery_count >= recovery_budget:
                     return ReliabilityResult(
                         success=False,
                         error=last_error,
                         attempts=attempts,
-                        recovery_attempted=recovery_count > 0,
+                        recovery_attempted=(
+                            recovery_count > 0
+                        ),
                         recovery_count=recovery_count,
                         reason=(
                             "Retry and recovery budgets exhausted."
+                        ),
+                    )
+
+                if last_error is None:
+                    return ReliabilityResult(
+                        success=False,
+                        attempts=attempts,
+                        recovery_attempted=False,
+                        recovery_count=recovery_count,
+                        reason=(
+                            "Retry budget exhausted without "
+                            "a recorded failure."
                         ),
                     )
 
@@ -204,24 +246,25 @@ class ReliabilityEngine:
                     self.failure_classifier.classify(
                         last_error
                     )
-                    if last_error is not None
-                    else None
                 )
 
                 recovery_decision = (
                     self.recovery_policy.evaluate(
                         classification
                     )
-                    if classification is not None
-                    else None
                 )
 
-                if recovery_decision and recovery_decision.action is not RecoveryAction.REPLAN:
+                if (
+                    recovery_decision.action
+                    is not RecoveryAction.REPLAN
+                ):
                     return ReliabilityResult(
                         success=False,
                         error=last_error,
                         attempts=attempts,
-                        recovery_attempted=recovery_count > 0,
+                        recovery_attempted=(
+                            recovery_count > 0
+                        ),
                         recovery_count=recovery_count,
                         reason=recovery_decision.reason,
                     )
@@ -231,41 +274,56 @@ class ReliabilityEngine:
                         success=False,
                         error=last_error,
                         attempts=attempts,
-                        recovery_attempted=recovery_count > 0,
+                        recovery_attempted=(
+                            recovery_count > 0
+                        ),
                         recovery_count=recovery_count,
                         reason="Recovery budget exhausted.",
                     )
 
-                success_flag, res = await self._execute_recovery(
-                    error=last_error,
-                    attempts=attempts,
-                    recovery_count=recovery_count,
-                    recovery_operation=recovery_operation,
-                    recovery_change_detector=recovery_change_detector,
+                success_flag, recovery_result = (
+                    await self._execute_recovery(
+                        error=last_error,
+                        attempts=attempts,
+                        recovery_count=recovery_count,
+                        recovery_operation=recovery_operation,
+                        recovery_change_detector=(
+                            recovery_change_detector
+                        ),
+                    )
                 )
-                if not success_flag:
-                    return res  
 
-                recovery_count += 1 
+                if not success_flag:
+                    return recovery_result  
+
+               
+                recovery_count += 1
+
+              
                 attempts_since_recovery = 0
                 last_error = None
+
                 continue
 
+         
             if attempts >= self.max_total_executions:
                 break
 
+        
             attempts += 1
             attempts_since_recovery += 1
 
             try:
                 result = await operation()
 
+               
                 if validator is not None:
                     try:
                         valid = validator(result)
                     except Exception as exc:
                         raise ValueError(
-                            f"{operation_name} validator failed: {exc}"
+                            f"{operation_name} validator failed: "
+                            f"{exc}"
                         ) from exc
 
                     if not valid:
@@ -278,12 +336,15 @@ class ReliabilityEngine:
                     success=True,
                     result=result,
                     attempts=attempts,
-                    recovery_attempted=recovery_count > 0,
+                    recovery_attempted=(
+                        recovery_count > 0
+                    ),
                     recovery_count=recovery_count,
                     reason="Operation succeeded.",
                 )
 
             except Exception as exc:
+
                 error = self.error_handler.handle(
                     exc,
                     source=source,
@@ -294,9 +355,12 @@ class ReliabilityEngine:
                 last_error = error
 
                 classification = (
-                    self.failure_classifier.classify(error)
+                    self.failure_classifier.classify(
+                        error
+                    )
                 )
 
+               
                 if (
                     attempts_since_recovery < retry_budget
                     and attempts < self.max_total_executions
@@ -304,7 +368,9 @@ class ReliabilityEngine:
                     retry_decision = (
                         self.retry_policy.evaluate(
                             classification,
-                            current_attempt=attempts_since_recovery,
+                            current_attempt=(
+                                attempts_since_recovery
+                            ),
                         )
                     )
 
@@ -314,6 +380,7 @@ class ReliabilityEngine:
                         )
                         continue
 
+                
                 recovery_decision = (
                     self.recovery_policy.evaluate(
                         classification
@@ -323,29 +390,69 @@ class ReliabilityEngine:
                 if (
                     recovery_decision.action
                     is RecoveryAction.REPLAN
-                    and recovery_operation is not None
-                    and recovery_count < recovery_budget
                 ):
-                    success_flag, res = await self._execute_recovery(
-                        error=error,
-                        attempts=attempts,
-                        recovery_count=recovery_count,
-                        recovery_operation=recovery_operation,
-                        recovery_change_detector=recovery_change_detector,
+
+                    if recovery_operation is None:
+                        return ReliabilityResult(
+                            success=False,
+                            error=last_error,
+                            attempts=attempts,
+                            recovery_attempted=(
+                                recovery_count > 0
+                            ),
+                            recovery_count=recovery_count,
+                            reason=(
+                                "Failure is recoverable, "
+                                "but no recovery operation "
+                                "is available."
+                            ),
+                        )
+
+                    if recovery_count >= recovery_budget:
+                        return ReliabilityResult(
+                            success=False,
+                            error=last_error,
+                            attempts=attempts,
+                            recovery_attempted=True,
+                            recovery_count=recovery_count,
+                            reason=(
+                                "Recovery budget exhausted."
+                            ),
+                        )
+
+                    success_flag, recovery_result = (
+                        await self._execute_recovery(
+                            error=error,
+                            attempts=attempts,
+                            recovery_count=recovery_count,
+                            recovery_operation=(
+                                recovery_operation
+                            ),
+                            recovery_change_detector=(
+                                recovery_change_detector
+                            ),
+                        )
                     )
+
                     if not success_flag:
-                        return res  # type: ignore
+                        return recovery_result  
 
                     recovery_count += 1
+
                     attempts_since_recovery = 0
                     last_error = None
+
                     continue
+
+              
 
                 return ReliabilityResult(
                     success=False,
                     error=last_error,
                     attempts=attempts,
-                    recovery_attempted=recovery_count > 0,
+                    recovery_attempted=(
+                        recovery_count > 0
+                    ),
                     recovery_count=recovery_count,
                     reason=(
                         recovery_decision.reason
@@ -359,11 +466,15 @@ class ReliabilityEngine:
                     ),
                 )
 
+      
+
         return ReliabilityResult(
             success=False,
             error=last_error,
             attempts=attempts,
-            recovery_attempted=recovery_count > 0,
+            recovery_attempted=(
+                recovery_count > 0
+            ),
             recovery_count=recovery_count,
             reason=(
                 "Global reliability execution budget exhausted."

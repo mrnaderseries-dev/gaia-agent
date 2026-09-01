@@ -76,34 +76,17 @@ class AgentState:
 
     recovery_attempted: bool = False
 
-    # ==========================================================
-    # Phase 2: separated execution states
-    #
-    # execution_success -> the execution machinery ran cleanly
-    # step_succeeded    -> the current step produced a usable result
-    # task_completed    -> the whole task finished (answer delivered)
-    # final_answer_ready / final_answer_verified -> answer status
-    #
-    # A blocked action must NEVER be recorded as execution_success.
-    # ==========================================================
-
+   
     execution_success: bool = False
 
     step_succeeded: bool = False
 
     task_completed: bool = False
 
-    # ==========================================================
-    # Phase 4: evidence / artifact registry (see core.evidence)
-    # ==========================================================
-
+   
     evidence: list[Any] = field(
         default_factory=list
     )
-
-    # ==========================================================
-    # Phase 6: bounded recovery counters
-    # ==========================================================
 
     replan_count: int = 0
     loop_salvage_attempted: bool = False
@@ -113,11 +96,9 @@ class AgentState:
     same_plan_count: int = 0
 
     last_failure_key: str | None = None
+    executed_step_fingerprints: set[str] = field(
+    default_factory=set
+)
 
-    # ==========================================================
-    # Phase 7: bounded semantic verification.
-    # After this many failed verification attempts the answer is
-    # delivered honestly as UNVERIFIED instead of looping.
-    # ==========================================================
-
+    
     verification_attempts: int = 0

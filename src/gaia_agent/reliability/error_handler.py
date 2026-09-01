@@ -49,8 +49,6 @@ class ErrorHandler:
                 "attempt cannot be negative."
             )
 
-        # If already a normalized AgentError, rebuild through replace()
-        # (AgentError is frozen; mutating it raises FrozenInstanceError).
         if isinstance(error, AgentError):
 
             merged_details = dict(error.details)
@@ -115,20 +113,15 @@ class ErrorHandler:
             return ErrorCategory.TIMEOUT
 
         if isinstance(error, builtins.NameError):
-            # LLM-generated code referenced an undefined name (or a
-            # tool name used as a Python callable). Recover by
-            # replanning with the correct tool instead of repeating
-            # the same invalid code.
+           
             return ErrorCategory.TOOL_EXECUTION_ERROR
 
         if isinstance(error, KeyError) and "not registered" in str(error):
-            # An unregistered tool must be classified as a missing-tool
-            # infrastructure/recovery error, never as an unknown error.
+          
             return ErrorCategory.TOOL_NOT_FOUND
 
         if isinstance(error, TypeError):
-            # "got an unexpected keyword argument" is an argument
-            # contract violation -> TOOL_ARGUMENT_ERROR.
+        
             message = str(error)
             if "keyword argument" in message or "missing" in message:
                 return ErrorCategory.TOOL_ARGUMENT_ERROR
@@ -293,13 +286,7 @@ class ErrorHandler:
         self,
         error: Exception,
     ) -> bool:
-
-        if isinstance(
-            error,
-            AgentRuntimeError,
-        ):
-            return error.recoverable
-
+  
         if isinstance(
             error,
             (
@@ -307,10 +294,6 @@ class ErrorHandler:
                 ToolArgumentError,
                 ToolExecutionError,
                 ModelExecutionError,
-                RateLimitError,
-                NetworkError,
-                TimeoutError,
-                ConnectionError,
                 EmptyResultError,
                 InvalidResultError,
                 FileNotFoundError,
@@ -320,6 +303,21 @@ class ErrorHandler:
             ),
         ):
             return True
+
+  
+        if isinstance(
+            error,
+            (
+                RateLimitError,
+                NetworkError,
+                TimeoutError,
+                ConnectionError,
+            ),
+        ):
+            return True
+
+        if isinstance(error, AgentRuntimeError):
+            return error.recoverable
 
         if isinstance(error, KeyError) and "not registered" in str(error):
             return True
