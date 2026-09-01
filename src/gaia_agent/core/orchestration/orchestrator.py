@@ -81,6 +81,8 @@ class Orchestrator:
         self.tracer = tracer
         self.state: AgentState | None = None
         self.correlation_id: UUID = uuid4()
+        # execution-history: set[str] خاص بالمهمة الحالية
+        self.execution_history: set[str] = set()
 
     def bind_state(
         self,
@@ -88,6 +90,8 @@ class Orchestrator:
     ) -> None:
         self.state = state
         self.agent_execution.bind_state(state)
+        # يُمسح عند bind_state()
+        self.execution_history.clear()
 
     def _require_state(
         self,
@@ -100,8 +104,47 @@ class Orchestrator:
         return self.state
 
     # ==========================================================
-    # Phase 6: bounded recovery / replanning
+    # Phase 6: bounded recovery / replanning & Fingerprinting
     # ==========================================================
+
+    def _execution_fingerprint(
+        self,
+        step: PlanStep,
+    ) -> str:
+        """
+        يُنشئ بصمة من:
+        step_type
+        tool_name
+        normalized arguments
+        ولـ LLM: الـ action
+        مثلاً: TOOL | web_search | query=Malko
+        """
+        step_type_val = (
+            step.step_type.value
+            if hasattr(step.step_type, "value")
+            else str(step.step_type)
+        )
+        tool_name_val = step.tool_name or "LLM"
+
+        if step.step_type == StepType.TOOL:
+            args_fp = self._arguments_fingerprint(
+                step.arguments or {}
+            )
+            return f"TOOL | {tool_name_val} | {args_fp}"
+        else:
+            action_val = (step.action or "").strip().lower()
+            return f"LLM | {action_val}"
+
+    def _has_seen_execution(
+        self,
+        step: PlanStep,
+    ) -> bool:
+        """
+        قبل قبول أي replan، نفحص:
+        هل هذا execution نُفّذ سابقًا؟ وليس فقط هل يساوي failed_step الحالي؟
+        """
+        fp = self._execution_fingerprint(step)
+        return fp in self.execution_history
 
     def _check_recovery_budget(
         self,
@@ -194,6 +237,10 @@ class Orchestrator:
 
             self._prepare_step(step)
 
+            # تسجيل الـ step عند التنفيذ الفعلي وليس عند توليد الـ plan أو عند _prepare_step()
+            fp = self._execution_fingerprint(step)
+            self.execution_history.add(fp)
+
             result = await self.reliability_engine.execute(
                 operation=self.agent_execution.execute,
                 operation_name="agent_execution",
@@ -203,11 +250,6 @@ class Orchestrator:
             )
 
             print("\n=== EXECUTION RESULT ===")
-            # ROOT-CAUSE FIX (misleading success semantics): keep
-            # execution success (did the step run cleanly), recovery
-            # replans and task completion strictly separate. A replan
-            # used to print "success: True" even though the tool call
-            # had failed and only the PLAN was replaced.
             print("step_success:", result.success)
             print("recovery_attempted:", result.recovery_attempted)
             print("step_succeeded:", state.step_succeeded)
@@ -544,16 +586,6 @@ class Orchestrator:
         budget_ok = self._check_recovery_budget(error)
 
         if not budget_ok:
-            # ----------------------------------------------------------
-            # ROOT-CAUSE FIX (recovery repeated the same strategy):
-            # when the same failure pattern repeats or the replan
-            # budget is exhausted, the old code simply terminated with
-            # "Recovery budget exceeded" / "The same failure recurred"
-            # (web_search -> same web_search -> same query -> budget).
-            # Recovery MUST instead choose a meaningfully different
-            # strategy; termination is only allowed when no different
-            # strategy exists.
-            # ----------------------------------------------------------
             alternative = await self._force_different_strategy(
                 failed_step=failed_step,
                 error=error,
@@ -592,13 +624,8 @@ class Orchestrator:
             new_step
         )
 
-        # --------------------------------------------------------------
-        # ROOT-CAUSE FIX: if the LLM replan produced the SAME
-        # execution (same tool + same arguments) as the step that just
-        # failed, do not run it again. Force a meaningfully different
-        # strategy instead of looping.
-        # --------------------------------------------------------------
-        if self._same_execution(new_step, failed_step):
+        # فحص ما إذا كان الـ new_step مكرراً (موجوداً مسبقاً في execution_history) أو يشبه الـ failed_step
+        if self._same_execution(new_step, failed_step) or self._has_seen_execution(new_step):
             alternative = await self._force_different_strategy(
                 failed_step=failed_step,
                 error=error,
@@ -606,7 +633,7 @@ class Orchestrator:
 
             if alternative is not None:
                 logger.info(
-                    "Replan repeated the failed execution; switching "
+                    "Replan repeated the failed execution or saw historical execution; switching "
                     "to a different strategy: %s (%s)",
                     alternative.action,
                     alternative.tool_name or "LLM",
@@ -673,20 +700,12 @@ class Orchestrator:
     ) -> PlanStep | None:
         """
         Deterministically pick a MEANINGFULLY DIFFERENT strategy after
-        a repeated failure:
-
-        1. an alternative tool/plan from the planner (visit_webpage
-           failure -> web_search, web_search failure -> visit the URL,
-           file reader failure -> the other reader, ...),
-        2. otherwise: reason over the evidence that was ALREADY
-           gathered (tool result -> inspect evidence -> reason), which
-           is always a different strategy than repeating the call.
-
-        Returns None when even this is impossible; the caller then
-        terminates the run honestly.
+        a repeated failure, checking history for alternatives A and B:
+        replan A -> seen -> reject -> alternative B -> seen -> reject -> STOP.
         """
         state = self._require_state()
 
+        # محاولة أولى للحصول على استراتيجية بديلة
         alternative = self.planner.get_alternative_strategy(
             user_question=state.user_request,
             failed_step=failed_step,
@@ -702,11 +721,15 @@ class Orchestrator:
                 )
                 alternative = None
 
+        # فحص البديل الأول مقابل التاريخ (history check)
+        if alternative is not None and self._has_seen_execution(alternative):
+            logger.info("Forced alternative A was already executed, rejecting.")
+            alternative = None
+
         if alternative is not None:
             return alternative
 
-        # No alternative tool strategy: answer from the evidence that
-        # was already gathered instead of repeating the same call.
+        # محاولة استراتيجية بديلة إضافية أو الاعتماد على الأدلة المتوفرة (evidence)
         has_evidence = any(
             getattr(record, "succeeded", False)
             and getattr(record, "result", None)
@@ -714,7 +737,7 @@ class Orchestrator:
         )
 
         if has_evidence:
-            return PlanStep(
+            evidence_step = PlanStep(
                 step_id=state.current_step,
                 action=(
                     "Answer the task strictly from the evidence "
@@ -725,6 +748,8 @@ class Orchestrator:
                 arguments={},
                 is_final_answer=True,
             )
+            if not self._has_seen_execution(evidence_step):
+                return evidence_step
 
         return None
 
@@ -776,6 +801,25 @@ class Orchestrator:
 
             return
 
+        # تطبيق الحماية وفحص التاريخ على مسار recovery
+        if self._has_seen_execution(new_step):
+            alternative = await self._force_different_strategy(
+                failed_step=state.plan[state.current_step] if state.plan and state.current_step < len(state.plan) else new_step,
+                error=AgentError(error_type="DuplicateExecution", message="Recovery returned seen step", source="orchestrator", operation="execution_recovery")
+            )
+            if alternative is not None:
+                new_step = alternative
+            else:
+                error = self.error_handler.handle(
+                    ValueError("Recovery produced an already executed step, and no new strategy is available."),
+                    source="orchestrator",
+                    operation="execution_recovery",
+                )
+                state.tool_error = error.message
+                state.fatal_error = True
+                self.metrics.increment("recovery_failures")
+                return
+
         self._replace_failed_step(
             new_step
         )
@@ -818,13 +862,6 @@ class Orchestrator:
             failed_index
         ] = replacement
 
-        # --------------------------------------------------------------
-        # ROOT-CAUSE FIX: when a failed tool step is replaced by a
-        # final-answer step (e.g. "answer from the evidence already
-        # gathered"), the plan must END there. Keeping the old trailing
-        # final step produced plans with two final-answer steps and let
-        # stale intermediate steps run after the answer existed.
-        # --------------------------------------------------------------
         if replacement.is_final_answer:
             state.plan = state.plan[
                 : failed_index + 1
@@ -868,15 +905,12 @@ class Orchestrator:
     def _validate_execution_result(
         state: AgentState,
     ) -> bool:
-        # A blocked action is NEVER success (Phase 2 / analysis item 9).
         if state.blocked:
             return False
 
         if state.tool_error is not None:
             return False
 
-        # Require an explicit success signal rather than assuming
-        # the absence of an error means the step succeeded.
         return bool(
             getattr(state, "step_succeeded", False)
             or getattr(state, "execution_success", False)
@@ -944,14 +978,6 @@ class Orchestrator:
         state: AgentState,
         context_items: list[Any],
     ) -> list[Any]:
-        """
-        Semantic verification (Phase 7) must judge the candidate
-        answer against the ACTUAL evidence gathered during execution,
-        not just the context window.
-
-        Evidence records are prepended so they are the primary source
-        the verifier evaluates.
-        """
         evidence = list(
             getattr(state, "evidence", []) or []
         )
@@ -966,7 +992,6 @@ class Orchestrator:
         item: Any,
         candidate_text: str,
     ) -> bool:
-        """Remove the final-answer generation echo from evidence."""
         if not candidate_text:
             return False
         if getattr(item, "tool_name", None) == "llm":
@@ -984,7 +1009,6 @@ class Orchestrator:
         self,
         state: AgentState,
     ) -> list[Any]:
-        """Build planner context that also includes gathered evidence."""
         context = await self.context_builder.build(
             state
         )
@@ -1050,7 +1074,7 @@ class Orchestrator:
                 ValueError(
                     "Final answer is missing."
                 ),
-                source="orchestrator",
+                source="verifier",
                 operation="verify_answer",
             )
 
@@ -1179,14 +1203,6 @@ class Orchestrator:
 
             return
 
-        # --------------------------------------------------------------
-        # ROOT-CAUSE FIX (false verification): the LLM judge must never
-        # simply declare its own answer verified. When strong tool
-        # evidence exists but does NOT contain the candidate answer
-        # (e.g. evidence pointed at answer 3, agent answered 4, or the
-        # agent invented "N2023-001" from thin air), the LLM verdict is
-        # rejected and the bounded verification failure path runs.
-        # --------------------------------------------------------------
         support = evidence_supports_candidate(
             candidate_answer=state.final_answer,
             raw_data=evidence_for_check,
@@ -1234,10 +1250,6 @@ class Orchestrator:
     ) -> None:
         state = self._require_state()
 
-        # Bounded verification budget: do NOT keep regenerating and
-        # re-verifying forever. Deliver the best candidate answer
-        # honestly marked as UNVERIFIED; the termination policy stops
-        # the loop with ANSWER_UNVERIFIED_BUDGET.
         if (
             getattr(state, "verification_attempts", 0)
             >= MAX_VERIFICATION_ATTEMPTS
@@ -1352,6 +1364,19 @@ class Orchestrator:
 
             return
 
+        # فحص التاريخ على مسار verification
+        if self._has_seen_execution(new_step):
+            alternative = await self._force_different_strategy(
+                failed_step=failed_step,
+                error=error,
+            )
+            if alternative is not None:
+                new_step = alternative
+            else:
+                state.tool_error = "Verification replan produced an already executed step."
+                self.metrics.increment("verification_recovery_failures")
+                return
+
         self._replace_failed_step(
             new_step
         )
@@ -1408,15 +1433,6 @@ class Orchestrator:
                 operation="execution",
             )
         ):
-            # ------------------------------------------------------
-            # Last-resort salvage (Phase 6): the recovery budget is
-            # exhausted, but if real evidence was already gathered and
-            # no answer exists yet, make ONE bounded attempt to answer
-            # strictly from that evidence instead of terminating with a
-            # bare failure. The attempt is flagged so it can happen at
-            # most once per task; the state remains unverified unless
-            # the verifier confirms the answer.
-            # ------------------------------------------------------
             if (
                 not state.loop_salvage_attempted
                 and state.evidence
@@ -1548,6 +1564,19 @@ class Orchestrator:
             )
 
             return
+
+        # تطبيق الحماية وفحص التاريخ على مسار loop
+        if self._has_seen_execution(new_step):
+            alternative = await self._force_different_strategy(
+                failed_step=failed_step,
+                error=error,
+            )
+            if alternative is not None:
+                new_step = alternative
+            else:
+                state.tool_error = "Loop recovery replan produced an already executed step."
+                self.metrics.increment("loop_recovery_failures")
+                return
 
         self._replace_failed_step(
             new_step
