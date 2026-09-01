@@ -81,7 +81,9 @@ class Orchestrator:
         self.tracer = tracer
         self.state: AgentState | None = None
         self.correlation_id: UUID = uuid4()
-        # execution-history: set[str] خاص بالمهمة الحالية
+        
+        # P0.3: execution-level loop prevention.
+        # Stores fingerprints of executions that have already been attempted.
         self.execution_history: set[str] = set()
 
     def bind_state(
@@ -103,22 +105,10 @@ class Orchestrator:
             )
         return self.state
 
-    # ==========================================================
-    # Phase 6: bounded recovery / replanning & Fingerprinting
-    # ==========================================================
-
     def _execution_fingerprint(
         self,
         step: PlanStep,
     ) -> str:
-        """
-        يُنشئ بصمة من:
-        step_type
-        tool_name
-        normalized arguments
-        ولـ LLM: الـ action
-        مثلاً: TOOL | web_search | query=Malko
-        """
         step_type_val = (
             step.step_type.value
             if hasattr(step.step_type, "value")
@@ -139,25 +129,22 @@ class Orchestrator:
         self,
         step: PlanStep,
     ) -> bool:
-        """
-        قبل قبول أي replan، نفحص:
-        هل هذا execution نُفّذ سابقًا؟ وليس فقط هل يساوي failed_step الحالي؟
-        """
         fp = self._execution_fingerprint(step)
         return fp in self.execution_history
+
+    def _record_execution(
+        self,
+        step: PlanStep,
+    ) -> None:
+        """Record an execution in the history to prevent repeating it."""
+        self.execution_history.add(
+            self._execution_fingerprint(step)
+        )
 
     def _check_recovery_budget(
         self,
         error: AgentError,
     ) -> bool:
-        """
-        Enforce MAX_REPLANS / MAX_SAME_FAILURE / MAX_SAME_PLAN.
-
-        Returns True when replanning is still allowed. When the
-        budget is exhausted the run is marked FATAL, because
-        repeating the same strategy without new information is
-        precisely the infinite-loop failure mode we are removing.
-        """
         state = self._require_state()
 
         state.replan_count += 1
@@ -237,9 +224,8 @@ class Orchestrator:
 
             self._prepare_step(step)
 
-            # تسجيل الـ step عند التنفيذ الفعلي وليس عند توليد الـ plan أو عند _prepare_step()
-            fp = self._execution_fingerprint(step)
-            self.execution_history.add(fp)
+            # تسجيل الـ execution فعلياً قبل التنفيذ لمنع التكرار
+            self._record_execution(step)
 
             result = await self.reliability_engine.execute(
                 operation=self.agent_execution.execute,
@@ -623,8 +609,7 @@ class Orchestrator:
         self._validate_step(
             new_step
         )
-
-        # فحص ما إذا كان الـ new_step مكرراً (موجوداً مسبقاً في execution_history) أو يشبه الـ failed_step
+       
         if self._same_execution(new_step, failed_step) or self._has_seen_execution(new_step):
             alternative = await self._force_different_strategy(
                 failed_step=failed_step,
@@ -705,7 +690,6 @@ class Orchestrator:
         """
         state = self._require_state()
 
-        # محاولة أولى للحصول على استراتيجية بديلة
         alternative = self.planner.get_alternative_strategy(
             user_question=state.user_request,
             failed_step=failed_step,
@@ -721,7 +705,6 @@ class Orchestrator:
                 )
                 alternative = None
 
-        # فحص البديل الأول مقابل التاريخ (history check)
         if alternative is not None and self._has_seen_execution(alternative):
             logger.info("Forced alternative A was already executed, rejecting.")
             alternative = None
@@ -729,7 +712,6 @@ class Orchestrator:
         if alternative is not None:
             return alternative
 
-        # محاولة استراتيجية بديلة إضافية أو الاعتماد على الأدلة المتوفرة (evidence)
         has_evidence = any(
             getattr(record, "succeeded", False)
             and getattr(record, "result", None)
@@ -801,7 +783,6 @@ class Orchestrator:
 
             return
 
-        # تطبيق الحماية وفحص التاريخ على مسار recovery
         if self._has_seen_execution(new_step):
             alternative = await self._force_different_strategy(
                 failed_step=state.plan[state.current_step] if state.plan and state.current_step < len(state.plan) else new_step,
@@ -1364,7 +1345,6 @@ class Orchestrator:
 
             return
 
-        # فحص التاريخ على مسار verification
         if self._has_seen_execution(new_step):
             alternative = await self._force_different_strategy(
                 failed_step=failed_step,
@@ -1565,7 +1545,6 @@ class Orchestrator:
 
             return
 
-        # تطبيق الحماية وفحص التاريخ على مسار loop
         if self._has_seen_execution(new_step):
             alternative = await self._force_different_strategy(
                 failed_step=failed_step,

@@ -4,18 +4,7 @@ import os
 import sys
 from typing import Any
 
-# ----------------------------------------------------------------------
-# ROOT-CAUSE FIX (Windows console crash):
-# The evaluation previously died with
-#   UnicodeEncodeError: 'charmap' codec can't encode character '\u014d'
-# because Python's stdout/stderr used the Windows ANSI code page
-# (cp1252/cp1256) when output was piped or captured. Any non-ASCII
-# character (task questions contain accents, IPA, CJK, ...) crashed the
-# print() call, aborted the whole evaluation run, and made individual
-# tasks submit the literal answer "Error".
-# Reconfiguring the streams to UTF-8 with errors="replace" fixes the
-# encoder itself instead of hiding the data.
-# ----------------------------------------------------------------------
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
@@ -103,13 +92,10 @@ def download_attachment(
 ) -> str | None:
     """
     Download the GAIA task attachment from the official scoring API
-    (GET {SCORING_API_BASE}/file/{task_id}) into
-    ``gaia_attachments/{task_id}/{file_name}``.
+    into ``gaia_attachments/{task_id}/{file_name}``.
 
-    Returns the file NAME relative to the attachment directory (which
-    the planner may pass to file tools), or None when there is no
-    attachment or the download fails. The failure is reported but never
-    faked: a missing file stays missing.
+    Returns the REAL absolute path to the downloaded attachment,
+    or None when there is no attachment or the download fails.
     """
     if not file_name or not str(file_name).strip():
         return None
@@ -120,7 +106,7 @@ def download_attachment(
     target_path = os.path.join(target_dir, file_name)
 
     if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
-        return file_name
+        return os.path.abspath(target_path)
 
     url = f"{SCORING_API_BASE}/file/{task_id}"
 
@@ -156,7 +142,7 @@ def download_attachment(
         f"({len(content)} bytes) for task {task_id}."
     )
 
-    return file_name
+    return os.path.abspath(target_path)
 
 def make_json_safe(value: Any) -> Any:
     if value is None:

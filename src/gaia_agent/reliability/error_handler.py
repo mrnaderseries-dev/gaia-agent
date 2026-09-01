@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import errno
 from dataclasses import replace
 from typing import Any
 from uuid import UUID
@@ -83,6 +84,17 @@ class ErrorHandler:
             correlation_id=correlation_id,
         )
 
+    def _is_network_os_error(self, error: Exception) -> bool:
+        if isinstance(error, OSError) and error.errno in {
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.ETIMEDOUT,
+            errno.ENETUNREACH,
+            errno.EHOSTUNREACH,
+        }:
+            return True
+        return False
+
     def _get_category(
         self,
         error: Exception,
@@ -113,15 +125,12 @@ class ErrorHandler:
             return ErrorCategory.TIMEOUT
 
         if isinstance(error, builtins.NameError):
-           
             return ErrorCategory.TOOL_EXECUTION_ERROR
 
         if isinstance(error, KeyError) and "not registered" in str(error):
-          
             return ErrorCategory.TOOL_NOT_FOUND
 
         if isinstance(error, TypeError):
-        
             message = str(error)
             if "keyword argument" in message or "missing" in message:
                 return ErrorCategory.TOOL_ARGUMENT_ERROR
@@ -155,6 +164,9 @@ class ErrorHandler:
             return ErrorCategory.INTERNAL
 
         if isinstance(error, ConnectionError):
+            return ErrorCategory.NETWORK
+
+        if self._is_network_os_error(error):
             return ErrorCategory.NETWORK
 
         if isinstance(error, ValueError):
@@ -206,6 +218,12 @@ class ErrorHandler:
         if isinstance(error, ToolExecutionError):
             return "TOOL_EXECUTION_ERROR"
 
+        if isinstance(error, NetworkError):
+            return "NETWORK_ERROR"
+
+        if self._is_network_os_error(error):
+            return "NETWORK_ERROR"
+
         return None
 
     def _get_severity(
@@ -237,6 +255,9 @@ class ErrorHandler:
                 ConnectionError,
             ),
         ):
+            return ErrorSeverity.MEDIUM
+
+        if self._is_network_os_error(error):
             return ErrorSeverity.MEDIUM
 
         if isinstance(
@@ -280,13 +301,16 @@ class ErrorHandler:
         ):
             return True
 
+        if self._is_network_os_error(error):
+            return True
+
         return False
 
     def _is_recoverable(
         self,
         error: Exception,
     ) -> bool:
-  
+
         if isinstance(
             error,
             (
@@ -299,12 +323,12 @@ class ErrorHandler:
                 FileNotFoundError,
                 PythonSyntaxError,
                 PythonImportError,
+                AuthorizationError,
                 builtins.NameError,
             ),
         ):
             return True
 
-  
         if isinstance(
             error,
             (
@@ -314,6 +338,9 @@ class ErrorHandler:
                 ConnectionError,
             ),
         ):
+            return True
+
+        if self._is_network_os_error(error):
             return True
 
         if isinstance(error, AgentRuntimeError):
