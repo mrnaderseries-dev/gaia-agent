@@ -1,37 +1,56 @@
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 from gaia_agent.core.agent_loop import AgentLoop
-from gaia_agent.core.policies.termination import TerminationReason
+from gaia_agent.core.policies.termination import (
+    TerminationPolicy,
+    TerminationReason,
+)
+
+
+def make_state(
+    *,
+    verified: bool,
+    verification_attempts: int,
+):
+    return SimpleNamespace(
+        user_request="test",
+        final_answer_ready=True,
+        final_answer_verified=verified,
+        verification_attempts=verification_attempts,
+        iteration=0,
+        fatal_error=False,
+        human_aborted=False,
+        explicit_stop=False,
+        timed_out=False,
+        task_completed=False,
+    )
 
 
 @pytest.mark.asyncio
 async def test_verified_answer_completes_and_emits_completed():
     orchestrator = Mock()
 
-    state = Mock()
-    state.final_answer_ready = True
-    state.final_answer_verified = True
-    state.verification_attempts = 1
-    state.task_completed = False
+    state = make_state(
+        verified=True,
+        verification_attempts=1,
+    )
 
     loop = AgentLoop(
         orchestrator=orchestrator,
-        max_iterations=3,
+        termination_policy=TerminationPolicy(
+            max_iterations=3,
+            max_verification_attempts=2,
+        ),
     )
 
-    loop.state = state
+    result = await loop.run(state)
 
-    termination = loop.check_termination()
+    assert result.final_answer_verified is True
+    assert result.termination_reason == TerminationReason.COMPLETED
 
-    assert termination.reason == TerminationReason.COMPLETED
-
-    state.task_completed = True
-
-    orchestrator.emit_agent_completed()
-
-    assert state.task_completed is True
     orchestrator.emit_agent_completed.assert_called_once()
 
 
@@ -39,27 +58,26 @@ async def test_verified_answer_completes_and_emits_completed():
 async def test_unverified_answer_budget_does_not_complete():
     orchestrator = Mock()
 
-    state = Mock()
-    state.final_answer_ready = True
-    state.final_answer_verified = False
-    state.verification_attempts = 2
-    state.task_completed = False
+    state = make_state(
+        verified=False,
+        verification_attempts=2,
+    )
 
     loop = AgentLoop(
         orchestrator=orchestrator,
-        max_iterations=3,
+        termination_policy=TerminationPolicy(
+            max_iterations=3,
+            max_verification_attempts=2,
+        ),
     )
 
-    loop.state = state
+    result = await loop.run(state)
 
-    termination = loop.check_termination()
-
+    assert result.final_answer_verified is False
     assert (
-        termination.reason
+        result.termination_reason
         == TerminationReason.ANSWER_UNVERIFIED_BUDGET
     )
 
-    state.task_completed = False
-
-    assert state.task_completed is False
+    assert result.task_completed is False
     orchestrator.emit_agent_completed.assert_not_called()

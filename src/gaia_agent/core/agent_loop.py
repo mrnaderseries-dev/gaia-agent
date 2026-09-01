@@ -21,13 +21,17 @@ class AgentLoop:
     ) -> None:
 
         self.orchestrator = orchestrator
-        if termination_policy is not None:
-            self.termination_policy = termination_policy
-        else:
-        
-            self.termination_policy = termination_policy 
+        self.termination_policy = termination_policy
         self.max_iterations = max_iterations
         self._state: AgentState | None = None
+
+    @property
+    def state(self) -> AgentState | None:
+        return self._state
+
+    @state.setter
+    def state(self, value: AgentState) -> None:
+        self._state = value
 
     async def run(
         self,
@@ -45,8 +49,7 @@ class AgentLoop:
         else:
             setattr(state, "user_request", user_req)
 
-        self._state = state
-        
+        self.state = state
         self.orchestrator.bind_state(state)
         self.orchestrator.emit_agent_started()
 
@@ -58,17 +61,13 @@ class AgentLoop:
 
             if termination.should_stop:
                 break
-
             if not getattr(state, "plan", None) or len(state.plan) == 0:
                 if hasattr(self.orchestrator, "generate_initial_plan"):
                     await self.orchestrator.generate_initial_plan()
                 elif hasattr(self.orchestrator, "plan"):
                     pass
-
             await self.orchestrator.run_iteration()
-
-            state.iteration += 1
-            
+            state.iteraion += 1
             print("\n--- ITERATION ---")
             print("iteration:", state.iteration)
             print("plan:", state.plan)
@@ -87,9 +86,7 @@ class AgentLoop:
             and state.final_answer_verified
         ):
             self.orchestrator.emit_agent_completed()
-
         return state
-
     def check_termination(
         self,
     ) -> TerminationDecision:
@@ -97,7 +94,7 @@ class AgentLoop:
         state = self._require_state()
 
         termination_state = TerminationState(
-            iteration=state.iteration,
+            iteration=getattr(state, "iteration", 0),
             final_answer_ready=(
                 getattr(
                     state,
@@ -148,16 +145,17 @@ class AgentLoop:
                 )
             ),
         )
-
-        decision = self.termination_policy.evaluate(
-            termination_state
-        )
+        if self.termination_policy is not None:
+            decision = self.termination_policy.evaluate(
+                termination_state
+            )
+        else:
+            decision = TerminationDecision(should_stop=False)
 
         if decision.should_stop:
             state.termination_reason = decision.reason
 
         return decision
-
     def _require_state(
         self,
     ) -> AgentState:
@@ -166,5 +164,4 @@ class AgentLoop:
             raise RuntimeError(
                 "AgentState is not bound."
             )
-
         return self._state
