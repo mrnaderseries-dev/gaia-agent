@@ -24,7 +24,6 @@ class FailureClassification:
 
 
 class FailureClassifier:
-
     def classify(
         self,
         error: AgentError,
@@ -36,6 +35,7 @@ class FailureClassifier:
                 reason="Critical runtime failure.",
             )
 
+       
         if error.retryable:
             return FailureClassification(
                 failure_type=FailureType.TRANSIENT,
@@ -45,19 +45,19 @@ class FailureClassifier:
         if error.recoverable:
             return FailureClassification(
                 failure_type=FailureType.RECOVERABLE,
-                reason="Failure may be handled by recovery.",
+                reason="Failure may be handled by recovery/replanning.",
             )
 
         if error.severity is ErrorSeverity.HIGH:
             return FailureClassification(
                 failure_type=FailureType.PERMANENT,
                 reason=(
-                    "High-severity failure is neither "
-                    "retryable nor recoverable."
+                    "High-severity failure is neither retryable "
+                    "nor recoverable."
                 ),
             )
 
         return FailureClassification(
             failure_type=FailureType.UNKNOWN,
-            reason="Failure could not be classified.",
+            reason="Failure could not be safely classified.",
         )

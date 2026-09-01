@@ -1,3 +1,4 @@
+
 import json
 import logging
 import os
@@ -8,517 +9,567 @@ from typing import Any, Sequence
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 os.environ.setdefault("PYTHONUTF8", "1")
 
-for _stream in (os.sys.stdout, os.sys.stderr):
-if hasattr(_stream, "reconfigure"):
-try:
-_stream.reconfigure(
-encoding="utf-8",
-errors="replace",
-)
-except Exception:
-pass
-
 from ..reliability.errors import AgentError
 from ..reliability.loop_detector import LoopDetector
 from ..planner.plan_schema import PlanSchema, PlanStep, StepType
 from ..tools.contract_validator import ToolContractValidator
 from ..tools.path_utils import is_placeholder_path
-from .task_classifier import (
-TaskAnalysis,
-TaskClassifier,
-TaskIntent,
-)
+from .task_classifier import TaskAnalysis, TaskClassifier, TaskIntent
 
-logger = logging.getLogger(**name**)
+logger = logging.getLogger(__name__)
+
 
 class PlannerRecoveryRequired(Exception):
-pass
+    """Raised when a generated plan violates a planner invariant."""
+
 
 class Planner:
-def **init**(
-self,
-*,
-client: Any,
-model: Any,
-available_tools: dict[str, Any] | list[Any],
-loop_detector: LoopDetector | None = None,
-available_files: Sequence[str] | None = None,
-base_dir: str = ".",
-) -> None:
-if client is None:
-raise ValueError("client cannot be None.")
+    """GAIA execution planner.
 
-```
-    if isinstance(model, str):
-        if not model.strip():
+    Responsibilities:
+    - classify the task
+    - generate/repair a PlanSchema
+    - validate tool contracts and plan structure
+    - produce a genuinely different replan after non-transient failures
+
+    Not responsible for:
+    - tool execution
+    - retries
+    - recovery budgets
+    - verification of the final answer
+    - loop execution
+    """
+
+    MAX_PLAN_STEPS = 20
+    MAX_CONTEXT_ITEMS = 10
+
+    _STRATEGY_FAMILY = {
+        "web_search": "WEB_SEARCH",
+        "visit_webpage": "DIRECT_WEBPAGE",
+        "analyze_image": "VISION",
+        "analyze_excel": "FILE_ANALYSIS",
+        "file_reader": "FILE_READER",
+        "python_interpreter": "PYTHON",
+    }
+
+    _FILE_PATH_ARGUMENT_TOOLS = {
+        "file_reader": ("file_path",),
+        "analyze_excel": ("file_path",),
+        "analyze_image": ("image_path",),
+    }
+
+    _SEARCH_STOPWORDS = frozenset(
+        {
+            "the",
+            "a",
+            "an",
+            "of",
+            "in",
+            "on",
+            "at",
+            "to",
+            "for",
+            "and",
+            "or",
+            "is",
+            "are",
+            "was",
+            "were",
+            "what",
+            "which",
+            "who",
+            "whom",
+            "whose",
+            "when",
+            "where",
+            "why",
+            "how",
+            "did",
+            "do",
+            "does",
+            "this",
+            "that",
+            "these",
+            "those",
+            "it",
+            "its",
+            "as",
+            "by",
+            "from",
+            "with",
+            "about",
+            "into",
+            "you",
+            "your",
+            "i",
+            "me",
+            "my",
+            "we",
+            "our",
+            "they",
+            "them",
+            "he",
+            "she",
+            "his",
+            "her",
+            "please",
+            "just",
+            "only",
+            "all",
+            "any",
+            "some",
+            "one",
+            "between",
+            "each",
+            "other",
+            "than",
+            "then",
+            "so",
+            "if",
+            "not",
+            "no",
+            "yes",
+            "been",
+            "being",
+            "have",
+            "has",
+            "had",
+            "also",
+            "more",
+            "most",
+            "very",
+            "out",
+            "up",
+            "down",
+            "over",
+            "under",
+            "there",
+            "here",
+            "can",
+            "could",
+            "should",
+            "would",
+            "will",
+            "may",
+            "might",
+            "must",
+            "shall",
+            "question",
+            "task",
+            "answer",
+        }
+    )
+
+    def __init__(
+        self,
+        *,
+        client: Any,
+        model: Any,
+        available_tools: dict[str, Any] | list[Any],
+        loop_detector: LoopDetector | None = None,
+        available_files: Sequence[str] | None = None,
+        base_dir: str = ".",
+    ) -> None:
+        if client is None:
+            raise ValueError("client cannot be None.")
+
+        if model is None or (
+            isinstance(model, str) and not model.strip()
+        ):
             raise ValueError("model cannot be empty.")
-    elif model is None:
-        raise ValueError("model cannot be None.")
 
-    if isinstance(available_tools, dict):
-        self.available_tools = dict(available_tools)
-    elif isinstance(available_tools, (list, tuple)):
-        self.available_tools = {
-            str(getattr(tool, "name", tool)): tool
-            for tool in available_tools
-        }
-    else:
-        raise TypeError(
-            "available_tools must be a dictionary or list."
+        if isinstance(available_tools, dict):
+            self.available_tools = dict(available_tools)
+        elif isinstance(available_tools, (list, tuple)):
+            self.available_tools = {
+                str(getattr(tool, "name", tool)): tool
+                for tool in available_tools
+            }
+        else:
+            raise TypeError(
+                "available_tools must be a dictionary or list."
+            )
+
+        self.client = client
+        self.model = model
+        self.loop_detector = loop_detector or LoopDetector()
+        self.base_dir = base_dir
+        self.available_files = list(available_files or [])
+        self.task_classifier = TaskClassifier()
+        self._current_question = ""
+
+    async def create_plan(
+        self,
+        user_question: str,
+        context: Sequence[Any] | None = None,
+    ) -> PlanSchema:
+        self._validate_question(user_question)
+        self._current_question = user_question
+
+        analysis = self._classify(user_question)
+
+        deterministic = self._deterministic_plan(
+            user_question,
+            analysis,
         )
 
-    self.client = client
-    self.model = model
-    self.loop_detector = loop_detector or LoopDetector()
-    self.base_dir = base_dir
-    self.available_files = list(available_files or [])
-    self.task_classifier = TaskClassifier()
-    self._current_question = ""
+        if deterministic is not None:
+            self._validate_generated_plan(
+                deterministic,
+                analysis=analysis,
+            )
+            return deterministic
 
-async def create_plan(
-    self,
-    user_question: str,
-    context: Sequence[Any] | None = None,
-) -> PlanSchema:
-    if not user_question or not user_question.strip():
-        raise ValueError(
-            "user_question cannot be empty."
-        )
-
-    analysis = self.task_classifier.classify(
-        user_question,
-        available_files=self.available_files,
-        available_tools=sorted(
-            self.available_tools.keys()
-        ),
-    )
-
-    self._current_question = user_question
-
-    prompt = self._build_initial_prompt(
-        user_question=user_question,
-        context=context,
-        analysis=analysis,
-    )
-
-    try:
-        plan = await self.client.generate(
-            [
-                {
-                    "role": "system",
-                    "content": self._system_prompt(),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            model=self.model,
-            output_schema=PlanSchema,
-        )
-
-        self._validate_generated_plan(
-            plan,
-            analysis=analysis,
-        )
-
-        return plan
-
-    except Exception as exc:
-        logger.exception(
-            "Initial planner generation or validation failed: %s",
-            exc,
-        )
-
-        fallback = self._emergency_fallback_plan(
+        prompt = self._build_initial_prompt(
             user_question=user_question,
+            context=context,
             analysis=analysis,
         )
 
-        self._validate_generated_plan(
-            fallback,
-            analysis=analysis,
-        )
+        try:
+            plan = await self.client.generate(
+                [
+                    {
+                        "role": "system",
+                        "content": self._system_prompt(),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                model=self.model,
+                output_schema=PlanSchema,
+            )
 
-        return fallback
-
-async def generate_plan(
-    self,
-    user_question: str,
-    context: Sequence[Any] | None = None,
-) -> PlanSchema:
-    return await self.create_plan(
-        user_question=user_question,
-        context=context,
-    )
-
-async def replan_step(
-    self,
-    *,
-    user_question: str,
-    context: Sequence[Any] | None,
-    failed_step: PlanStep,
-    failure: AgentError,
-) -> PlanStep:
-    plan = await self.replan(
-        user_question=user_question,
-        context=context,
-        failed_step=failed_step,
-        failure=failure,
-    )
-
-    if not plan.steps:
-        raise PlannerRecoveryRequired(
-            "Replanned step produced an empty plan."
-        )
-
-    return plan.steps[0]
-
-async def replan(
-    self,
-    user_question: str,
-    context: Sequence[Any] | None,
-    failed_step: PlanStep,
-    failure: AgentError,
-) -> PlanSchema:
-    if not user_question or not user_question.strip():
-        raise ValueError(
-            "user_question cannot be empty."
-        )
-
-    if failed_step is None:
-        raise ValueError(
-            "failed_step cannot be None."
-        )
-
-    if failure is None:
-        raise ValueError(
-            "failure cannot be None."
-        )
-
-    logger.warning(
-        "Triggering full replan after failure at step %s: %s",
-        failed_step.step_id,
-        failure.message,
-    )
-
-    failed_step_fingerprint = self._fingerprint_step(
-        failed_step
-    )
-
-    analysis = self.task_classifier.classify(
-        user_question,
-        available_files=self.available_files,
-        available_tools=sorted(
-            self.available_tools.keys()
-        ),
-    )
-
-    self._current_question = user_question
-
-    prompt = self._build_replan_prompt(
-        user_question=user_question,
-        context=context,
-        failed_step=failed_step,
-        failure=failure,
-        analysis=analysis,
-    )
-
-    try:
-        plan = await self.client.generate(
-            [
-                {
-                    "role": "system",
-                    "content": self._system_prompt(),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
-            model=self.model,
-            output_schema=PlanSchema,
-        )
-
-        self._validate_generated_plan(
-            plan,
-            failed_step_fingerprint=failed_step_fingerprint,
-            analysis=analysis,
-        )
-
-        return plan
-
-    except Exception as exc:
-        logger.exception(
-            "Planner generation or validation failed during replan: %s",
-            exc,
-        )
-
-        fallback = self._emergency_fallback_plan(
-            user_question=user_question,
-            failed_step=failed_step,
-            analysis=analysis,
-        )
-
-        fallback_fingerprint = {
-            self._fingerprint_step(step)
-            for step in fallback.steps
-        }
-
-        if failed_step_fingerprint in fallback_fingerprint:
-            alternative = self.get_alternative_strategy(
-                user_question=user_question,
-                failed_step=failed_step,
+            self._validate_generated_plan(
+                plan,
                 analysis=analysis,
             )
 
-            if alternative is not None:
-                fallback = PlanSchema(
-                    steps=[
-                        alternative,
-                        PlanStep(
-                            step_id=1,
-                            action=(
-                                "Synthesize the final answer "
-                                "using only the evidence obtained"
-                            ),
-                            step_type=StepType.LLM,
-                            tool_name=None,
-                            arguments={},
-                            is_final_answer=True,
-                        ),
-                    ]
-                )
-            else:
-                fallback = self._llm_only_plan()
+            return plan
 
-        self._validate_generated_plan(
-            fallback,
-            failed_step_fingerprint=failed_step_fingerprint,
+        except Exception as exc:
+            logger.exception(
+                "Initial planner generation/validation failed: %s",
+                exc,
+            )
+
+            fallback = self._emergency_fallback_plan(
+                user_question=user_question,
+                analysis=analysis,
+            )
+
+            self._validate_generated_plan(
+                fallback,
+                analysis=analysis,
+            )
+
+            return fallback
+
+    async def generate_plan(
+        self,
+        user_question: str,
+        context: Sequence[Any] | None = None,
+    ) -> PlanSchema:
+        return await self.create_plan(
+            user_question=user_question,
+            context=context,
+        )
+
+    async def replan_step(
+        self,
+        *,
+        user_question: str,
+        context: Sequence[Any] | None,
+        failed_step: PlanStep,
+        failure: AgentError,
+    ) -> PlanStep:
+        plan = await self.replan(
+            user_question=user_question,
+            context=context,
+            failed_step=failed_step,
+            failure=failure,
+        )
+
+        if not plan.steps:
+            raise PlannerRecoveryRequired(
+                "Replanned plan is empty."
+            )
+
+        return plan.steps[0]
+
+    async def replan(
+        self,
+        user_question: str,
+        context: Sequence[Any] | None,
+        failed_step: PlanStep,
+        failure: AgentError,
+    ) -> PlanSchema:
+        self._validate_question(user_question)
+
+        if failed_step is None:
+            raise ValueError("failed_step cannot be None.")
+
+        if failure is None:
+            raise ValueError("failure cannot be None.")
+
+        self._current_question = user_question
+
+        analysis = self._classify(user_question)
+
+        failed_fp = self._fingerprint_step(failed_step)
+        failure_type = self._get_failure_type(failure)
+
+        prompt = self._build_replan_prompt(
+            user_question=user_question,
+            context=context,
+            failed_step=failed_step,
+            failure=failure,
             analysis=analysis,
         )
 
-        return fallback
+        try:
+            plan = await self.client.generate(
+                [
+                    {
+                        "role": "system",
+                        "content": self._system_prompt(),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                model=self.model,
+                output_schema=PlanSchema,
+            )
 
-def _validate_generated_plan(
-    self,
-    plan: PlanSchema,
-    failed_step_fingerprint: str | None = None,
-    analysis: TaskAnalysis | None = None,
-) -> None:
-    if not isinstance(plan, PlanSchema):
-        raise ValueError(
-            "Planner output must be a PlanSchema."
+            self._validate_generated_plan(
+                plan,
+                failed_step_fingerprint=failed_fp,
+                failed_step=failed_step,
+                failure_type=failure_type,
+                analysis=analysis,
+            )
+
+            return plan
+
+        except Exception as exc:
+            logger.exception(
+                "Planner replan generation/validation failed: %s",
+                exc,
+            )
+
+        alternative = self.get_alternative_strategy(
+            user_question=user_question,
+            failed_step=failed_step,
+            analysis=analysis,
+            failure_type=failure_type,
         )
 
-    self._validate_plan_structure(plan)
+        if alternative is not None:
+            plan = self._tool_and_final_plan(
+                action=alternative.action,
+                tool_name=alternative.tool_name or "",
+                arguments=alternative.arguments,
+            )
 
-    for step in plan.steps:
-        self._validate_step(step)
+            self._validate_generated_plan(
+                plan,
+                failed_step_fingerprint=failed_fp,
+                failed_step=failed_step,
+                failure_type=failure_type,
+                analysis=analysis,
+            )
 
-    self._validate_final_answer_structure(plan)
+            return plan
 
-    if (
-        analysis is not None
-        and analysis.forbidden_tools
-    ):
-        forbidden = set(
-            analysis.forbidden_tools
-        )
+        if self._has_successful_evidence(context):
+            plan = self._llm_only_plan()
 
-        for step in plan.steps:
-            if (
-                step.step_type == StepType.TOOL
-                and step.tool_name in forbidden
-            ):
-                raise PlannerRecoveryRequired(
-                    "Planner used forbidden tool "
-                    f"'{step.tool_name}' for a "
-                    f"{analysis.intent.value} task."
-                )
+            self._validate_generated_plan(
+                plan,
+                failed_step_fingerprint=failed_fp,
+                failed_step=failed_step,
+                failure_type=failure_type,
+                analysis=analysis,
+            )
 
-    plan_loop = self.loop_detector.check_plan(
-        plan.steps
-    )
-
-    if plan_loop.detected:
-        logger.warning(
-            "Planner produced a repeated plan: %s",
-            plan_loop.message,
-        )
+            return plan
 
         raise PlannerRecoveryRequired(
-            "Planner produced a repeated execution plan."
+            "Unable to construct a valid, meaningfully different "
+            "recovery plan. "
+            f"failed_tool={failed_step.tool_name!r}, "
+            f"failure_type={failure_type!r}"
         )
 
-    if failed_step_fingerprint is not None:
-        for step in plan.steps:
-            current_fingerprint = (
-                self._fingerprint_step(step)
+    def _validate_generated_plan(
+        self,
+        plan: PlanSchema,
+        *,
+        failed_step_fingerprint: str | None = None,
+        failed_step: PlanStep | None = None,
+        failure_type: str | None = None,
+        analysis: TaskAnalysis | None = None,
+    ) -> None:
+        if not isinstance(plan, PlanSchema):
+            raise ValueError(
+                "Planner output must be a PlanSchema."
             )
 
-            if (
-                current_fingerprint
+        self._validate_plan_structure(plan)
+
+        for step in plan.steps:
+            self._validate_step(step)
+
+        self._validate_final_answer_structure(plan)
+
+        if analysis is not None and analysis.forbidden_tools:
+            forbidden = set(analysis.forbidden_tools)
+
+            for step in plan.steps:
+                if (
+                    step.step_type == StepType.TOOL
+                    and step.tool_name in forbidden
+                ):
+                    raise PlannerRecoveryRequired(
+                        f"Forbidden tool '{step.tool_name}' "
+                        f"for {analysis.intent.value} task."
+                    )
+
+        fingerprints = [
+            self._fingerprint_step(step)
+            for step in plan.steps
+            if not step.is_final_answer
+        ]
+
+        if len(fingerprints) != len(set(fingerprints)):
+            raise PlannerRecoveryRequired(
+                "Plan contains duplicate tool executions."
+            )
+
+        loop_result = self.loop_detector.check_plan(
+            plan.steps
+        )
+
+        if loop_result.detected:
+            raise PlannerRecoveryRequired(
+                "Planner produced a repeated execution plan."
+            )
+
+        if failed_step_fingerprint is not None:
+            if any(
+                self._fingerprint_step(step)
                 == failed_step_fingerprint
+                for step in plan.steps
             ):
                 raise PlannerRecoveryRequired(
-                    "Replanned strategy repeats the "
-                    "previously failed execution."
+                    "Replanned plan repeats the failed execution."
                 )
 
-def _validate_plan_structure(
-    self,
-    plan: PlanSchema,
-) -> None:
-    if not plan.steps:
-        raise ValueError(
-            "Plan must contain at least one step."
-        )
-
-    if len(plan.steps) > 20:
-        raise ValueError(
-            "Plan contains too many steps. "
-            "Maximum allowed is 20."
-        )
-
-    for expected_id, step in enumerate(plan.steps):
-        if step is None:
-            raise ValueError(
-                f"Plan step {expected_id} cannot be None."
+        if failed_step is not None:
+            self._validate_recovery_strategy(
+                plan=plan,
+                failed_step=failed_step,
+                failure_type=failure_type or "",
             )
 
-        if step.step_id != expected_id:
+    def _validate_plan_structure(
+        self,
+        plan: PlanSchema,
+    ) -> None:
+        if not plan.steps:
             raise ValueError(
-                "Step sequence error: "
-                f"expected ID {expected_id}, "
-                f"got {step.step_id}."
+                "Plan must contain at least one step."
             )
 
-def _validate_step(
-    self,
-    step: PlanStep,
-) -> None:
-    if step is None:
-        raise ValueError(
-            "Plan step cannot be None."
-        )
+        if len(plan.steps) > self.MAX_PLAN_STEPS:
+            raise ValueError(
+                "Plan contains too many steps. "
+                f"Maximum is {self.MAX_PLAN_STEPS}."
+            )
 
-    if not step.action or not step.action.strip():
-        raise ValueError(
-            "Step action cannot be empty."
-        )
+        for expected_id, step in enumerate(plan.steps):
+            if step is None:
+                raise ValueError(
+                    f"Plan step {expected_id} cannot be None."
+                )
 
-    if step.step_type == StepType.TOOL:
-        if not step.tool_name:
+            if step.step_id != expected_id:
+                raise ValueError(
+                    "Step IDs must be sequential: "
+                    f"expected {expected_id}, got {step.step_id}."
+                )
+
+    def _validate_step(self, step: PlanStep) -> None:
+        if not step.action or not step.action.strip():
+            raise ValueError(
+                "Step action cannot be empty."
+            )
+
+        if step.step_type == StepType.LLM:
+            if step.tool_name is not None:
+                raise ValueError(
+                    "LLM step cannot specify tool_name."
+                )
+
+            if step.arguments:
+                raise ValueError(
+                    "LLM step cannot contain arguments."
+                )
+
+            return
+
+        if step.step_type != StepType.TOOL:
+            raise ValueError(
+                f"Unsupported step type: {step.step_type}"
+            )
+
+        self._validate_tool_step(step)
+
+    def _validate_tool_step(self, step: PlanStep) -> None:
+        if (
+            not isinstance(step.tool_name, str)
+            or not step.tool_name
+        ):
             raise ValueError(
                 "TOOL step must specify tool_name."
             )
 
-        if not isinstance(step.tool_name, str):
+        if step.tool_name.lower() in {
+            "final_answer",
+            "final",
+            "answer",
+        }:
+            raise PlannerRecoveryRequired(
+                "Final-answer pseudo-tool is not allowed."
+            )
+
+        if step.tool_name not in self.available_tools:
             raise ValueError(
-                "tool_name must be a string."
+                f"Unknown or unavailable tool: "
+                f"{step.tool_name}"
             )
 
-        if step.tool_name.lower() == "final_answer":
-            logger.info(
-                "Converted 'final_answer' tool call "
-                "to an LLM final-answer step."
-            )
-
-            step.step_type = StepType.LLM
-            step.tool_name = None
-            step.arguments = {}
-            step.is_final_answer = True
-
-            return
-
-        repaired_name = step.tool_name
-
-        if repaired_name not in self.available_tools:
-            repaired_name = self._repair_tool_name(
-                repaired_name
-            )
-
-            if not repaired_name:
-                raise ValueError(
-                    "Unknown or unavailable tool: "
-                    f"{step.tool_name}"
-                )
-
-            logger.warning(
-                "Repaired unknown tool name '%s' -> '%s'.",
-                step.tool_name,
-                repaired_name,
-            )
-
-            step.tool_name = repaired_name
-
-        if not isinstance(
-            step.arguments,
-            dict,
-        ):
+        if not isinstance(step.arguments, dict):
             raise ValueError(
-                f"Arguments for tool "
-                f"'{step.tool_name}' "
+                f"Arguments for '{step.tool_name}' "
                 "must be a dictionary."
             )
 
-        step.arguments = (
-            self._filter_arguments_for_tool(
-                step.tool_name,
-                step.arguments,
-            )
+        step.arguments = self._normalize_arguments(
+            step.tool_name,
+            step.arguments,
         )
 
         if step.tool_name == "web_search":
-            raw_query = str(
-                step.arguments.get(
-                    "query",
-                    "",
-                )
-                or ""
-            ).strip()
+            self._validate_search_arguments(step)
 
-            normalized_question = " ".join(
-                (self._current_question or "")
-                .split()
-            ).lower()
-
-            normalized_query = " ".join(
-                raw_query.split()
-            ).lower()
-
-            too_long = (
-                len(raw_query.split()) > 15
-            )
-
-            echoes_question = (
-                bool(normalized_question)
-                and normalized_query
-                == normalized_question
-            )
-
-            if raw_query and (
-                echoes_question
-                or too_long
-            ):
-                repaired_query = (
-                    self._build_search_query(
-                        self._current_question
-                        or raw_query
-                    )
-                )
-
-                if repaired_query:
-                    step.arguments["query"] = (
-                        repaired_query
-                    )
-
-        step.arguments = (
-            self._repair_file_arguments(
-                step.tool_name,
-                step.arguments,
-            )
+        step.arguments = self._repair_file_arguments(
+            step.tool_name,
+            step.arguments,
         )
 
         ToolContractValidator.validate_step_contract(
@@ -526,1420 +577,1269 @@ def _validate_step(
             self.available_tools,
         )
 
-        return
+    def _validate_final_answer_structure(
+        self,
+        plan: PlanSchema,
+    ) -> None:
+        finals = [
+            step
+            for step in plan.steps
+            if step.is_final_answer
+        ]
 
-    if step.step_type == StepType.LLM:
-        if step.tool_name is not None:
+        if len(finals) != 1:
             raise ValueError(
-                "LLM step cannot specify tool_name."
+                "Plan must contain exactly one "
+                "final-answer step."
             )
 
-        if step.arguments:
+        final = finals[0]
+
+        if final.step_id != len(plan.steps) - 1:
             raise ValueError(
-                "LLM step cannot contain tool arguments."
+                "Final-answer step must be the last step."
             )
 
-        return
-
-    raise ValueError(
-        f"Unsupported step type: "
-        f"{step.step_type}"
-    )
-
-def _validate_final_answer_structure(
-    self,
-    plan: PlanSchema,
-) -> None:
-    final_steps = [
-        step
-        for step in plan.steps
-        if step.is_final_answer
-    ]
-
-    if len(final_steps) != 1:
-        raise ValueError(
-            "Plan must contain exactly one "
-            "final-answer step."
-        )
-
-    final_step = final_steps[0]
-
-    if final_step.step_id != len(plan.steps) - 1:
-        raise ValueError(
-            "Final-answer step must be the last step."
-        )
-
-    if final_step.step_type != StepType.LLM:
-        raise ValueError(
-            "Final-answer step must be an LLM step."
-        )
-
-    if final_step.tool_name is not None:
-        raise ValueError(
-            "Final-answer step cannot contain a tool."
-        )
-
-    if final_step.arguments:
-        raise ValueError(
-            "Final-answer step cannot contain "
-            "tool arguments."
-        )
-
-def _repair_tool_name(
-    self,
-    tool_name: str,
-) -> str | None:
-    if not tool_name or not isinstance(
-        tool_name,
-        str,
-    ):
-        return None
-
-    wanted = set(
-        re.findall(
-            r"[a-z0-9]+",
-            tool_name.lower(),
-        )
-    )
-
-    if not wanted:
-        return None
-
-    best_name: str | None = None
-    best_score = 0
-
-    for name in self.available_tools:
-        candidates = set(
-            re.findall(
-                r"[a-z0-9]+",
-                name.lower(),
-            )
-        )
-
-        score = len(
-            wanted & candidates
-        )
-
-        if score > best_score:
-            best_name = name
-            best_score = score
-
-    return (
-        best_name
-        if best_score >= 1
-        else None
-    )
-
-def _filter_arguments_for_tool(
-    self,
-    tool_name: str,
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    spec = self.available_tools.get(
-        tool_name
-    )
-
-    if spec is None:
-        return arguments
-
-    inputs = (
-        getattr(
-            spec,
-            "arguments_schema",
-            None,
-        )
-        or getattr(
-            spec,
-            "inputs",
-            None,
-        )
-        or {}
-    )
-
-    if not arguments or not inputs:
-        return arguments
-
-    aliases: dict[str, str] = {
-        "q": "query",
-        "search": "query",
-        "search_query": "query",
-        "search_term": "query",
-        "question": "query",
-        "link": "url",
-        "webpage": "url",
-        "page_url": "url",
-        "website": "url",
-        "file": "file_path",
-        "filepath": "file_path",
-        "filename": "file_path",
-        "path": "file_path",
-        "image": "image_path",
-        "image_file": "image_path",
-        "spreadsheet": "file_path",
-        "excel_path": "file_path",
-        "python_code": "code",
-        "script": "code",
-    }
-
-    repaired: dict[str, Any] = {}
-
-    for key, value in arguments.items():
-        if key in inputs:
-            target = key
-        else:
-            target = aliases.get(key)
-
-        if (
-            target
-            and target in inputs
-            and target not in repaired
-        ):
-            repaired[target] = value
-
-    return repaired
-
-_SEARCH_STOPWORDS: frozenset[str] = frozenset(
-    {
-        "the",
-        "a",
-        "an",
-        "of",
-        "in",
-        "on",
-        "at",
-        "to",
-        "for",
-        "and",
-        "or",
-        "is",
-        "are",
-        "was",
-        "were",
-        "what",
-        "which",
-        "who",
-        "whom",
-        "whose",
-        "when",
-        "where",
-        "why",
-        "how",
-        "did",
-        "do",
-        "does",
-        "this",
-        "that",
-        "these",
-        "those",
-        "it",
-        "its",
-        "as",
-        "by",
-        "from",
-        "with",
-        "about",
-        "into",
-        "you",
-        "your",
-        "i",
-        "me",
-        "my",
-        "we",
-        "our",
-        "they",
-        "them",
-        "he",
-        "she",
-        "his",
-        "her",
-        "please",
-        "just",
-        "only",
-        "all",
-        "any",
-        "some",
-        "one",
-        "between",
-        "each",
-        "other",
-        "than",
-        "then",
-        "so",
-        "if",
-        "not",
-        "no",
-        "yes",
-        "been",
-        "being",
-        "have",
-        "has",
-        "had",
-        "also",
-        "more",
-        "most",
-        "very",
-        "out",
-        "up",
-        "down",
-        "over",
-        "under",
-        "there",
-        "here",
-        "can",
-        "could",
-        "should",
-        "would",
-        "will",
-        "may",
-        "might",
-        "must",
-        "shall",
-        "question",
-        "task",
-        "answer",
-    }
-)
-
-_FILE_PATH_ARGUMENT_TOOLS: dict[
-    str,
-    tuple[str, ...],
-] = {
-    "file_reader": ("file_path",),
-    "analyze_excel": ("file_path",),
-    "analyze_image": ("image_path",),
-}
-
-def _build_search_query(
-    self,
-    user_question: str,
-) -> str:
-    text = (user_question or "").strip()
-
-    if not text:
-        return ""
-
-    text = re.sub(
-        r"https?://\S+",
-        " ",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    ).strip()
-
-    words = re.findall(
-        r"[A-Za-z0-9'-]+",
-        text,
-    )
-
-    keywords = [
-        word
-        for word in words
-        if word.lower()
-        not in self._SEARCH_STOPWORDS
-    ]
-
-    if not keywords:
-        keywords = words
-
-    return " ".join(
-        keywords[:10]
-    )
-
-def _repair_file_arguments(
-    self,
-    tool_name: str,
-    arguments: dict[str, Any],
-) -> dict[str, Any]:
-    path_args = (
-        self._FILE_PATH_ARGUMENT_TOOLS.get(
-            tool_name
-        )
-    )
-
-    if not path_args:
-        return arguments
-
-    repaired = dict(arguments or {})
-    files = list(self.available_files)
-
-    for arg_name in path_args:
-        value = repaired.get(arg_name)
-
-        if value is None:
-            continue
-
-        value_str = (
-            str(value)
-            .strip()
-            .strip("'\"")
-        )
-
-        if is_placeholder_path(
-            value_str
-        ):
+        if final.step_type != StepType.LLM:
             raise ValueError(
-                f"File path argument "
-                f"'{arg_name}' of tool "
-                f"'{tool_name}' is a placeholder "
-                f"('{value_str}'). "
-                "Use a real file from "
-                "AVAILABLE LOCAL FILES."
+                "Final-answer step must be an LLM step."
             )
 
-        if not files:
-            continue
+        if final.tool_name is not None or final.arguments:
+            raise ValueError(
+                "Final-answer step cannot contain "
+                "tool data."
+            )
+
+    def _validate_recovery_strategy(
+        self,
+        *,
+        plan: PlanSchema,
+        failed_step: PlanStep,
+        failure_type: str,
+    ) -> None:
+        if failed_step.step_type != StepType.TOOL:
+            return
+
+        non_final = [
+            step
+            for step in plan.steps
+            if (
+                not step.is_final_answer
+                and step.step_type == StepType.TOOL
+            )
+        ]
+
+        if not non_final:
+            return
 
         normalized = (
-            value_str
-            .lower()
-            .replace("\\", "/")
+            failure_type.lower()
+            .replace("-", "_")
+            .replace(" ", "_")
         )
 
-        normalized_name = Path(
-            normalized
-        ).name
-
-        real = next(
-            (
-                candidate
-                for candidate in files
-                if candidate.lower()
-                .replace("\\", "/")
-                == normalized
-            ),
-            None,
-        )
-
-        if real is None:
-            real = next(
-                (
-                    candidate
-                    for candidate in files
-                    if Path(candidate)
-                    .name
-                    .lower()
-                    == normalized_name
-                ),
-                None,
-            )
-
-        if real is None:
-            suffix = Path(
-                normalized_name
-            ).suffix.lower()
-
-            if suffix:
-                real = next(
-                    (
-                        candidate
-                        for candidate in files
-                        if Path(candidate)
-                        .suffix
-                        .lower()
-                        == suffix
-                    ),
-                    None,
-                )
-
-        if real is None:
-            raise ValueError(
-                f"File path '{value_str}' "
-                "does not match any real "
-                f"attachment. Available files: "
-                f"{files}."
-            )
-
-        if real != value_str:
-            logger.warning(
-                "Repaired file path '%s' -> '%s' "
-                "for tool '%s'.",
-                value_str,
-                real,
-                tool_name,
-            )
-
-        repaired[arg_name] = real
-
-    return repaired
-
-def get_alternative_strategy(
-    self,
-    *,
-    user_question: str,
-    failed_step: PlanStep,
-    analysis: TaskAnalysis | None = None,
-) -> PlanStep | None:
-    if analysis is None:
-        analysis = self.task_classifier.classify(
-            user_question,
-            available_files=self.available_files,
-            available_tools=sorted(
-                self.available_tools.keys()
-            ),
-        )
-
-    failed_tool = (
-        failed_step.tool_name
-        if (
-            failed_step is not None
-            and failed_step.step_type
-            == StepType.TOOL
-        )
-        else None
-    )
-
-    has_python = (
-        "python_interpreter"
-        in self.available_tools
-    )
-
-    has_web = (
-        "web_search"
-        in self.available_tools
-    )
-
-    has_visit = (
-        "visit_webpage"
-        in self.available_tools
-    )
-
-    url_match = re.search(
-        r"https?://[^\s<>]+",
-        user_question or "",
-        re.IGNORECASE,
-    )
-
-    candidates: list[PlanStep] = []
-
-    if (
-        failed_tool == "visit_webpage"
-        and has_web
-        and "web_search"
-        not in analysis.forbidden_tools
-    ):
-        candidates.append(
-            PlanStep(
-                step_id=0,
-                action=(
-                    "Search the web for "
-                    "the required fact"
-                ),
-                step_type=StepType.TOOL,
-                tool_name="web_search",
-                arguments={
-                    "query": (
-                        self._build_search_query(
-                            user_question
-                        )
-                    )
-                },
-                is_final_answer=False,
+        transient = any(
+            item in normalized
+            for item in (
+                "timeout",
+                "rate_limit",
+                "transient",
+                "connection",
             )
         )
 
-    if (
-        failed_tool == "web_search"
-        and has_visit
-        and url_match
-    ):
-        candidates.append(
-            PlanStep(
-                step_id=0,
-                action=(
-                    "Visit the URL mentioned "
-                    "in the task and extract "
-                    "the required information"
-                ),
-                step_type=StepType.TOOL,
-                tool_name="visit_webpage",
-                arguments={
-                    "url": url_match.group(0)
-                },
-                is_final_answer=False,
+        invalid_args = any(
+            item in normalized
+            for item in (
+                "invalid_argument",
+                "validation",
+                "schema",
+                "argument",
             )
         )
 
-    file_step = self._file_fallback_step(
-        user_question=user_question,
-        failed_tool=failed_tool,
-    )
+        if transient or invalid_args:
+            return
 
-    if file_step is not None:
-        candidates.append(
-            PlanStep(
-                step_id=0,
-                action=file_step["action"],
-                step_type=StepType.TOOL,
-                tool_name=file_step["tool_name"],
-                arguments=file_step["arguments"],
-                is_final_answer=False,
+        failed_family = self._strategy_family(
+            failed_step
+        )
+
+        families = {
+            self._strategy_family(step)
+            for step in non_final
+        }
+
+        if families == {failed_family}:
+            raise PlannerRecoveryRequired(
+                "Recovery did not change strategy family: "
+                + failed_family
             )
-        )
 
-    if (
-        has_python
-        and failed_tool != "python_interpreter"
-        and analysis.intent
-        in (
-            TaskIntent.ARITHMETIC,
-            TaskIntent.TEXT_TRANSFORMATION,
-        )
-    ):
-        code = self._deterministic_fallback_code(
+    def get_alternative_strategy(
+        self,
+        *,
+        user_question: str,
+        failed_step: PlanStep,
+        analysis: TaskAnalysis | None = None,
+        failure_type: str | None = None,
+    ) -> PlanStep | None:
+        analysis = analysis or self._classify(
             user_question
         )
 
-        if code:
-            candidates.append(
-                PlanStep(
-                    step_id=0,
-                    action=(
-                        "Compute the exact result "
-                        "with Python code"
-                    ),
-                    step_type=StepType.TOOL,
-                    tool_name="python_interpreter",
-                    arguments={
-                        "code": code
-                    },
-                    is_final_answer=False,
-                )
-            )
+        failed_tool = (
+            failed_step.tool_name
+            if failed_step.step_type == StepType.TOOL
+            else None
+        )
 
-    failed_fingerprint = (
-        self._fingerprint_step(
+        failed_family = self._strategy_family(
             failed_step
         )
-        if failed_step is not None
-        else None
-    )
 
-    for candidate in candidates:
-        if failed_fingerprint is None:
-            return candidate
+        failure_type = failure_type or ""
 
-        if (
-            self._fingerprint_step(candidate)
-            != failed_fingerprint
-        ):
-            return candidate
+        candidates: list[PlanStep] = []
 
-    return None
-
-def _build_initial_prompt(
-    self,
-    *,
-    user_question: str,
-    context: Sequence[Any] | None,
-    analysis: TaskAnalysis | None = None,
-) -> str:
-    analysis_text = ""
-
-    if analysis is not None:
-        analysis_text = (
-            "TASK ANALYSIS "
-            "(deterministic guidance):\n"
-            f"- intent: "
-            f"{analysis.intent.value}\n"
-            f"- {analysis.analysis_text}\n"
-        )
-
-        if analysis.forbidden_tools:
-            analysis_text += (
-                "- DO NOT use these tools: "
-                f"{', '.join(analysis.forbidden_tools)}\n"
-            )
+        url = self._extract_url(user_question)
 
         if (
-            analysis.recommended_first_tool
-            is not None
+            failed_tool == "web_search"
+            and url
+            and "visit_webpage" in self.available_tools
         ):
-            analysis_text += (
-                "- Prefer the tool: "
-                f"{analysis.recommended_first_tool}\n"
-            )
-
-    return f"""
-```
-
-Create an executable PlanSchema for this GAIA task.
-
-USER REQUEST:
-{user_question}
-
-CONTEXT:
-{self._format_context(context)}
-
-AVAILABLE LOCAL FILES:
-{self._format_available_files()}
-
-{analysis_text}
-
-AVAILABLE TOOLS:
-{self._format_tools()}
-
-PLANNING REQUIREMENTS:
-
-1. Use only available tools.
-2. Use exact tool names.
-3. Use only arguments allowed by the tool schema.
-4. Never invent file paths, URLs, artifact IDs, or tools.
-5. Never put Python code into a web-search query.
-6. Use the minimum number of steps required.
-7. For multi-hop tasks, gather evidence before answering.
-8. For numerical tasks, retrieve exact values and calculate when needed.
-9. The final-answer step must be the LAST step.
-10. The final-answer step must be an LLM step.
-11. There must be exactly one final-answer step.
-12. Never create a final-answer step merely to hide a failure.
-13. Every TOOL step must contain a valid tool_name.
-14. Every TOOL step must satisfy its exact contract.
-15. TEXT TRANSFORMATION RULE:
-    For reversing, counting, sorting, anagrams,
-    encoding/decoding, or arithmetic, use
-    python_interpreter whenever available.
-16. NO SEARCH BY DEFAULT:
-    Do not use web_search when reasoning, Python,
-    local files, or supplied context are sufficient.
-17. URL RULE:
-    If the request contains a URL, visit that exact URL first.
-18. WIKIPEDIA RULE:
-    If Wikipedia is explicitly requested, use visit_webpage
-    on the relevant Wikipedia URL.
-19. SEARCH HYGIENE:
-    web_search queries must be short keyword queries,
-    normally 2-10 key terms, never the raw user question.
-
-Return only a valid PlanSchema.
-""".strip()
-
-```
-def _build_replan_prompt(
-    self,
-    *,
-    user_question: str,
-    context: Sequence[Any] | None,
-    failed_step: PlanStep,
-    failure: AgentError,
-    analysis: TaskAnalysis | None = None,
-) -> str:
-    failure_type = self._get_failure_type(
-        failure
-    )
-
-    failed_arguments = json.dumps(
-        failed_step.arguments or {},
-        ensure_ascii=False,
-        default=str,
-    )
-
-    loop_guidance = ""
-
-    if failure_type == "LoopDetected":
-        loop_guidance = """
-```
-
-LOOP CONTEXT:
-The previous strategy repeated itself without producing
-new information.
-
-If the existing CONTEXT already contains enough evidence,
-use ONLY the final-answer LLM step.
-
-Do NOT perform the same search again.
-
-If evidence is insufficient, change the tool AND the
-query/strategy substantially.
-"""
-
-```
-    analysis_guidance = ""
-
-    if analysis is not None:
-        analysis_guidance = (
-            "TASK ANALYSIS:\n"
-            f"- intent: {analysis.intent.value}\n"
-            f"- {analysis.analysis_text}\n"
-        )
-
-        if analysis.forbidden_tools:
-            analysis_guidance += (
-                "- DO NOT use these tools: "
-                f"{', '.join(analysis.forbidden_tools)}\n"
-            )
-
-        if analysis.recommended_first_tool:
-            analysis_guidance += (
-                "- Prefer the tool: "
-                f"{analysis.recommended_first_tool}\n"
-            )
-
-    return f"""
-```
-
-The previous execution strategy failed.
-
-You MUST create a genuinely different execution strategy.
-
-{loop_guidance}
-
-USER REQUEST:
-{user_question}
-
-CONTEXT:
-{self._format_context(context)}
-
-{analysis_guidance}
-
-EVIDENCE REUSE RULE:
-
-If the CONTEXT already contains enough evidence to answer
-the task, return ONLY the final-answer LLM step.
-
-Do not repeat searches or service calls for information
-already present in the CONTEXT.
-
-FAILED STEP:
-step_id: {failed_step.step_id}
-action: {failed_step.action}
-step_type: {failed_step.step_type.value}
-tool_name: {failed_step.tool_name}
-arguments: {failed_arguments}
-
-FAILURE TYPE:
-{failure_type}
-
-FAILURE MESSAGE:
-{failure.message}
-
-AVAILABLE TOOLS:
-{self._format_tools()}
-
-REPLANNING RULES:
-
-1. Do NOT repeat the failed tool call unchanged.
-2. Do NOT repeat the same tool with the same arguments.
-3. Do NOT invent tools.
-4. Do NOT invent arguments.
-5. If arguments were invalid, use the exact tool schema.
-6. If the previous tool lacks the capability, use another tool.
-7. If search failed, substantially change the search strategy.
-8. Never invent files or artifact paths.
-9. A failure is NOT evidence that the task is solved.
-10. Never turn a failed execution into a final answer
-    unless sufficient evidence already exists.
-11. The final-answer step must always be LAST.
-12. The final-answer step must always be an LLM step.
-13. There must be exactly one final-answer step.
-14. The final answer must be based on gathered evidence.
-15. Prefer a different strategy over an identical retry.
-
-Return only PlanSchema.
-""".strip()
-
-```
-def _system_prompt(self) -> str:
-    return f"""
-```
-
-You are the GAIA Benchmark Execution Planner.
-
-Your job is to transform a user request into a precise,
-executable PlanSchema.
-
-AVAILABLE TOOLS AND CONTRACTS:
-{self._format_tools()}
-
-FIRST DECISION:
-
-Determine whether a tool is actually required.
-
-If the task can be answered using reasoning or supplied
-context, use ONLY one final LLM step.
-
-NEVER use web_search by default.
-
-RULES:
-
-1. Use only listed tools.
-2. Tool names must match exactly.
-3. TOOL steps must contain tool_name.
-4. Never hallucinate tool names.
-5. Never hallucinate tool arguments.
-6. Never invent files or paths.
-7. Use only arguments defined by each tool schema.
-8. Never assume capabilities not explicitly provided.
-9. Step IDs must start at 0 and increment by 1.
-10. The final-answer step must be the LAST step.
-11. The final-answer step must be an LLM step.
-12. There must be exactly one final-answer step.
-13. Never use a final-answer step to hide a failure.
-14. Keep plans minimal and purposeful.
-
-MULTI-HOP:
-retrieve
--> inspect
--> extract
--> calculate if necessary
--> verify
--> final answer
-
-NUMERICAL:
-retrieve exact information
--> calculate
--> verify
--> final answer
-
-FILE:
-locate real file
--> inspect
--> extract
--> verify
--> final answer
-
-SEARCH:
-short keyword search
--> inspect relevant evidence
--> extract
--> final answer
-
-TEXT TRANSFORMATION:
-python_interpreter
--> final answer
-
-If the request contains a URL:
-visit_webpage that exact URL first.
-
-If Wikipedia is explicitly requested:
-visit the relevant Wikipedia page.
-
-When replanning:
-
-* change strategy when necessary
-* repair invalid arguments
-* select another tool when appropriate
-* change search queries after failed searches
-* never blindly repeat a failed call
-* never fabricate evidence
-* never claim success because execution failed
-
-Return only a valid PlanSchema.
-""".strip()
-
-```
-def _format_available_files(self) -> str:
-    if not self.available_files:
-        return "No local data files were detected."
-
-    return "\n".join(
-        f"- {name}"
-        for name in self.available_files
-    )
-
-def _format_tools(self) -> str:
-    if not self.available_tools:
-        return "No tools available."
-
-    lines: list[str] = []
-
-    for tool in self.available_tools.values():
-        schema = (
-            getattr(
-                tool,
-                "arguments_schema",
-                None,
-            )
-            or getattr(
-                tool,
-                "inputs",
-                None,
-            )
-            or {}
-        )
-
-        description = getattr(
-            tool,
-            "description",
-            "",
-        )
-
-        name = getattr(
-            tool,
-            "name",
-            None,
-        )
-
-        if not name:
-            continue
-
-        lines.append(
-            "\n".join(
-                [
-                    f"TOOL: {name}",
-                    f"DESCRIPTION: {description}",
-                    "ARGUMENT SCHEMA:",
-                    json.dumps(
-                        schema,
-                        ensure_ascii=False,
-                        indent=2,
-                        default=str,
-                    ),
-                ]
-            )
-        )
-
-    if not lines:
-        return "No valid tools available."
-
-    return "\n\n".join(lines)
-
-def _format_context(
-    self,
-    context: Sequence[Any] | None,
-) -> str:
-    if not context:
-        return "No additional context."
-
-    items = list(context)[-10:]
-    formatted: list[str] = []
-
-    for item in items:
-        try:
-            if hasattr(item, "model_dump"):
-                item = item.model_dump()
-            elif hasattr(item, "dict"):
-                item = item.dict()
-
-            formatted.append(
-                json.dumps(
-                    item,
-                    ensure_ascii=False,
-                    default=str,
-                )
-            )
-
-        except Exception:
-            formatted.append(
-                str(item)
-            )
-
-    return "\n".join(
-        f"- {item}"
-        for item in formatted
-    )
-
-def _fingerprint_step(
-    self,
-    step: PlanStep,
-) -> str:
-    normalized_arguments = json.dumps(
-        step.arguments or {},
-        sort_keys=True,
-        ensure_ascii=False,
-        default=str,
-    )
-
-    return (
-        f"{step.step_type.value}|"
-        f"{step.tool_name or ''}|"
-        f"{normalized_arguments}"
-    )
-
-def _get_failure_type(
-    self,
-    failure: AgentError,
-) -> str:
-    failure_type = getattr(
-        failure,
-        "failure_type",
-        None,
-    )
-
-    if failure_type is not None:
-        return getattr(
-            failure_type,
-            "value",
-            str(failure_type),
-        )
-
-    error_type = getattr(
-        failure,
-        "error_type",
-        None,
-    )
-
-    if error_type is not None:
-        return getattr(
-            error_type,
-            "value",
-            str(error_type),
-        )
-
-    return failure.__class__.__name__
-
-def _emergency_fallback_plan(
-    self,
-    *,
-    user_question: str,
-    failed_step: PlanStep | None = None,
-    analysis: TaskAnalysis | None = None,
-) -> PlanSchema:
-    failed_tool = (
-        failed_step.tool_name
-        if failed_step is not None
-        else None
-    )
-
-    intent = (
-        analysis.intent
-        if analysis is not None
-        else TaskIntent.UNKNOWN
-    )
-
-    has_python = (
-        "python_interpreter"
-        in self.available_tools
-    )
-
-    has_web = (
-        "web_search"
-        in self.available_tools
-    )
-
-    has_visit = (
-        "visit_webpage"
-        in self.available_tools
-    )
-
-    if intent in (
-        TaskIntent.ARITHMETIC,
-        TaskIntent.TEXT_TRANSFORMATION,
-    ):
-        if (
-            has_python
-            and failed_tool
-            != "python_interpreter"
-        ):
-            code = (
-                self._deterministic_fallback_code(
-                    user_question
-                )
-            )
-
-            if code:
-                return self._tool_and_final_plan(
+            candidates.append(
+                self._tool_step(
                     action=(
-                        "Compute the exact result "
-                        "with Python code"
+                        "Visit the exact URL provided and "
+                        "extract the required information"
                     ),
-                    tool_name="python_interpreter",
-                    arguments={
-                        "code": code
-                    },
+                    tool_name="visit_webpage",
+                    arguments={"url": url},
+                )
+            )
+
+        if (
+            failed_tool == "visit_webpage"
+            and "web_search" in self.available_tools
+            and "web_search"
+            not in (analysis.forbidden_tools or ())
+        ):
+            query = self._build_search_query(
+                user_question
+            )
+
+            if query:
+                candidates.append(
+                    self._tool_step(
+                        action=(
+                            "Search for independent evidence "
+                            "using concise factual keywords"
+                        ),
+                        tool_name="web_search",
+                        arguments={"query": query},
+                    )
                 )
 
-        return self._llm_only_plan()
-
-    if intent == TaskIntent.LOCAL_FILE:
         file_step = self._file_fallback_step(
             user_question=user_question,
             failed_tool=failed_tool,
         )
 
-        if file_step is not None:
-            return self._tool_and_final_plan(
-                action=file_step["action"],
-                tool_name=file_step["tool_name"],
-                arguments=file_step["arguments"],
+        if file_step:
+            candidates.append(
+                self._tool_step(**file_step)
             )
-
-        return self._llm_only_plan()
-
-    if intent == TaskIntent.URL_PAGE:
-        url_match = re.search(
-            r"https?://[^\s<>]+",
-            user_question or "",
-            re.IGNORECASE,
-        )
 
         if (
-            url_match
-            and has_visit
-            and failed_tool
-            != "visit_webpage"
+            "python_interpreter" in self.available_tools
+            and failed_tool != "python_interpreter"
+            and analysis.intent
+            in (
+                TaskIntent.ARITHMETIC,
+                TaskIntent.TEXT_TRANSFORMATION,
+            )
         ):
-            return self._tool_and_final_plan(
-                action=(
-                    "Visit the URL and extract "
-                    "the required information"
-                ),
-                tool_name="visit_webpage",
-                arguments={
-                    "url": url_match.group(0)
-                },
+            code = self._deterministic_fallback_code(
+                user_question
             )
 
-        return self._llm_only_plan()
+            if code:
+                candidates.append(
+                    self._tool_step(
+                        action=(
+                            "Compute the exact result "
+                            "with Python"
+                        ),
+                        tool_name="python_interpreter",
+                        arguments={"code": code},
+                    )
+                )
 
-    if (
-        analysis is not None
-        and "web_search"
-        in (
-            analysis.forbidden_tools
-            or ()
-        )
-    ):
-        return self._llm_only_plan()
+        for candidate in candidates:
+            if (
+                self._fingerprint_step(candidate)
+                == self._fingerprint_step(failed_step)
+            ):
+                continue
 
-    if (
-        has_web
-        and failed_tool
-        != "web_search"
-    ):
-        query = self._build_search_query(
+            if (
+                self._strategy_family(candidate)
+                == failed_family
+            ):
+                continue
+
+            return candidate
+
+        return None
+
+    def _deterministic_plan(
+        self,
+        question: str,
+        analysis: TaskAnalysis,
+    ) -> PlanSchema | None:
+        if analysis.intent in (
+            TaskIntent.ARITHMETIC,
+            TaskIntent.TEXT_TRANSFORMATION,
+        ):
+            if "python_interpreter" in self.available_tools:
+                code = self._deterministic_fallback_code(
+                    question
+                )
+
+                if code:
+                    return self._tool_and_final_plan(
+                        action=(
+                            "Compute the exact result "
+                            "with Python"
+                        ),
+                        tool_name="python_interpreter",
+                        arguments={"code": code},
+                    )
+
+        if analysis.intent == TaskIntent.URL_PAGE:
+            url = self._extract_url(question)
+
+            if (
+                url
+                and "visit_webpage"
+                in self.available_tools
+            ):
+                return self._tool_and_final_plan(
+                    action=(
+                        "Visit the exact URL and extract "
+                        "the requested information"
+                    ),
+                    tool_name="visit_webpage",
+                    arguments={"url": url},
+                )
+
+        if analysis.intent == TaskIntent.IMAGE:
+            if "analyze_image" in self.available_tools:
+                target = self._select_file(
+                    question,
+                    self._image_extensions(),
+                )
+
+                if target:
+                    return self._tool_and_final_plan(
+                        action=(
+                            "Analyze the provided image "
+                            "and answer the requested question"
+                        ),
+                        tool_name="analyze_image",
+                        arguments={
+                            "image_path": target,
+                            "question": question,
+                        },
+                    )
+
+        return None
+
+    def _emergency_fallback_plan(
+        self,
+        *,
+        user_question: str,
+        failed_step: PlanStep | None = None,
+        analysis: TaskAnalysis | None = None,
+    ) -> PlanSchema:
+        analysis = analysis or self._classify(
             user_question
         )
 
-        if query:
+        failed_tool = (
+            failed_step.tool_name
+            if failed_step
+            else None
+        )
+
+        if analysis.intent in (
+            TaskIntent.ARITHMETIC,
+            TaskIntent.TEXT_TRANSFORMATION,
+        ):
+            if (
+                "python_interpreter"
+                in self.available_tools
+                and failed_tool != "python_interpreter"
+            ):
+                code = self._deterministic_fallback_code(
+                    user_question
+                )
+
+                if code:
+                    return self._tool_and_final_plan(
+                        action=(
+                            "Compute the exact result "
+                            "with Python"
+                        ),
+                        tool_name="python_interpreter",
+                        arguments={"code": code},
+                    )
+
+        if analysis.intent == TaskIntent.URL_PAGE:
+            url = self._extract_url(user_question)
+
+            if (
+                url
+                and "visit_webpage"
+                in self.available_tools
+                and failed_tool != "visit_webpage"
+            ):
+                return self._tool_and_final_plan(
+                    action=(
+                        "Visit the exact URL and extract "
+                        "the requested information"
+                    ),
+                    tool_name="visit_webpage",
+                    arguments={"url": url},
+                )
+
+        file_step = self._file_fallback_step(
+            user_question=user_question,
+            failed_tool=failed_tool,
+        )
+
+        if file_step:
             return self._tool_and_final_plan(
-                action=(
-                    "Search for relevant evidence"
-                ),
-                tool_name="web_search",
-                arguments={
-                    "query": query
-                },
+                **file_step
             )
-
-    return self._llm_only_plan()
-
-def _llm_only_plan(self) -> PlanSchema:
-    return PlanSchema(
-        steps=[
-            PlanStep(
-                step_id=0,
-                action=(
-                    "Answer the user request directly "
-                    "using reasoning and available context"
-                ),
-                step_type=StepType.LLM,
-                tool_name=None,
-                arguments={},
-                is_final_answer=True,
-            )
-        ]
-    )
-
-def _tool_and_final_plan(
-    self,
-    *,
-    action: str,
-    tool_name: str,
-    arguments: dict[str, Any],
-) -> PlanSchema:
-    return PlanSchema(
-        steps=[
-            PlanStep(
-                step_id=0,
-                action=action,
-                step_type=StepType.TOOL,
-                tool_name=tool_name,
-                arguments=arguments,
-                is_final_answer=False,
-            ),
-            PlanStep(
-                step_id=1,
-                action=(
-                    "Synthesize the final answer "
-                    "using only the evidence obtained"
-                ),
-                step_type=StepType.LLM,
-                tool_name=None,
-                arguments={},
-                is_final_answer=True,
-            ),
-        ]
-    )
-
-def _deterministic_fallback_code(
-    self,
-    user_question: str,
-) -> str | None:
-    ratio = detect_factorial_ratio(
-        user_question
-    )
-
-    if ratio is not None:
-        return (
-            "import math\n"
-            f"result = math.factorial({ratio[0]}) "
-            f"// math.factorial({ratio[1]})"
-        )
-
-    expression = detect_simple_operation(
-        user_question
-    )
-
-    if expression is not None:
-        return (
-            f"result = {expression}"
-        )
-
-    return None
-
-def _file_fallback_step(
-    self,
-    *,
-    user_question: str,
-    failed_tool: str | None,
-) -> dict[str, Any] | None:
-    if not self.available_files:
-        return None
-
-    has_excel = (
-        "analyze_excel"
-        in self.available_tools
-    )
-
-    has_reader = (
-        "file_reader"
-        in self.available_tools
-    )
-
-    lowered_question = (
-        user_question or ""
-    ).lower()
-
-    target: str | None = None
-
-    for name in self.available_files:
-        stem = (
-            os.path.splitext(name)[0]
-            .lower()
-        )
 
         if (
-            stem
-            and stem in lowered_question
+            "web_search" in self.available_tools
+            and failed_tool != "web_search"
+            and "web_search"
+            not in (analysis.forbidden_tools or ())
         ):
-            target = name
-            break
+            query = self._build_search_query(
+                user_question
+            )
 
-    if target is None:
-        target = self.available_files[0]
+            if query:
+                return self._tool_and_final_plan(
+                    action=(
+                        "Search for relevant "
+                        "independent evidence"
+                    ),
+                    tool_name="web_search",
+                    arguments={"query": query},
+                )
 
-    suffix = (
-        os.path.splitext(target)[1]
-        .lower()
-    )
+        return self._llm_only_plan()
 
-    if (
-        suffix
-        in {
-            ".xlsx",
-            ".xls",
-            ".xlsm",
-            ".csv",
+    def _build_initial_prompt(
+        self,
+        *,
+        user_question: str,
+        context: Sequence[Any] | None,
+        analysis: TaskAnalysis,
+    ) -> str:
+        return f"""
+Create an executable PlanSchema for this GAIA task.
+
+USER REQUEST:
+
+{user_question}
+
+TASK ANALYSIS:
+
+- intent: {analysis.intent.value}
+- needs_external_info: {analysis.needs_external_info}
+- recommended_first_tool: {analysis.recommended_first_tool}
+- analysis: {analysis.analysis_text}
+- forbidden_tools: {', '.join(analysis.forbidden_tools) or 'none'}
+
+CURRENT CONTEXT:
+
+{self._format_context(context)}
+
+AVAILABLE LOCAL FILES:
+
+{self._format_available_files()}
+
+AVAILABLE TOOLS:
+
+{self._format_tools()}
+
+RULES:
+
+1. Use only listed tools and exact tool names.
+2. Use only arguments allowed by each tool schema.
+3. Never invent files, URLs, artifact IDs, tools, or arguments.
+4. Do not use web_search when supplied context, reasoning, Python, or a real local artifact is sufficient.
+5. Web queries must be concise factual keywords, not the raw question and never Python code.
+6. For a direct URL, visit that exact URL first when visit_webpage is available.
+7. For image/file tasks, use only a real file from AVAILABLE LOCAL FILES.
+8. Never select an arbitrary local file merely because one exists.
+9. For arithmetic/text transformations, prefer python_interpreter when available.
+10. Multi-hop: retrieve -> inspect/extract -> calculate if necessary -> verify -> final.
+11. Keep the plan minimal and purposeful.
+12. Exactly one final-answer step.
+13. Final-answer step is an LLM step and MUST be last.
+14. Never use a final step to hide a failed tool call.
+15. Return only a valid PlanSchema.
+""".strip()
+
+    def _build_replan_prompt(
+        self,
+        *,
+        user_question: str,
+        context: Sequence[Any] | None,
+        failed_step: PlanStep,
+        failure: AgentError,
+        analysis: TaskAnalysis,
+    ) -> str:
+        failure_type = self._get_failure_type(
+            failure
+        )
+
+        failed_arguments = json.dumps(
+            failed_step.arguments or {},
+            ensure_ascii=False,
+            default=str,
+        )
+
+        failed_family = self._strategy_family(
+            failed_step
+        )
+
+        return f"""
+Create a replacement PlanSchema after an execution failure.
+
+USER REQUEST:
+
+{user_question}
+
+TASK ANALYSIS:
+
+- intent: {analysis.intent.value}
+- needs_external_info: {analysis.needs_external_info}
+- recommended_first_tool: {analysis.recommended_first_tool}
+- analysis: {analysis.analysis_text}
+- forbidden_tools: {', '.join(analysis.forbidden_tools) or 'none'}
+
+CURRENT CONTEXT / EVIDENCE:
+
+{self._format_context(context)}
+
+FAILED STEP:
+
+- step_id: {failed_step.step_id}
+- action: {failed_step.action}
+- step_type: {failed_step.step_type.value}
+- tool_name: {failed_step.tool_name}
+- strategy_family: {failed_family}
+- arguments: {failed_arguments}
+
+FAILURE TYPE:
+
+{failure_type}
+
+FAILURE MESSAGE:
+
+{getattr(failure, "message", str(failure))}
+
+AVAILABLE LOCAL FILES:
+
+{self._format_available_files()}
+
+AVAILABLE TOOLS:
+
+{self._format_tools()}
+
+REPLANNING RULES:
+
+1. Do not repeat the failed execution or its exact arguments.
+2. A different query using the same failed capability is NOT automatically a different strategy.
+3. For capability, access, blocked-source, or loop failures, change strategy family.
+4. For invalid-argument/schema failures, the same tool is allowed ONLY after correcting its contract.
+5. Do not retry transient failures here; ReliabilityEngine owns transient retry policy.
+6. Never invent a tool, argument, URL, artifact ID, or file path.
+7. Never select an arbitrary local file.
+8. A failure is never evidence that the answer is known.
+9. Reuse successful evidence already in context.
+10. If sufficient evidence already exists, use only the final LLM step.
+11. If web_search failed and a direct URL exists, visit the exact URL when applicable.
+12. If visit_webpage failed, use independent search when applicable.
+13. If a required artifact cannot be resolved, fail cleanly rather than fabricate a path.
+14. Exactly one final-answer step; it must be last and must be an LLM step.
+15. Return only a valid PlanSchema.
+""".strip()
+
+    def _system_prompt(self) -> str:
+        return f"""
+You are the GAIA Benchmark Execution Planner.
+
+Your output is a PlanSchema, not an answer.
+
+AVAILABLE TOOLS AND CONTRACTS:
+
+{self._format_tools()}
+
+CORE RULES:
+
+- Use only available tools.
+- Exact tool names only.
+- Exact argument schemas only.
+- Never invent files, URLs, artifact IDs, tools, or evidence.
+- Never use a final-answer pseudo-tool.
+- Exactly one final-answer LLM step, and it must be last.
+- Keep plans minimal.
+- Never use web_search by default.
+- Web queries are short factual keywords.
+- Never put Python code into web-search queries.
+- For local artifacts, use only paths explicitly listed as available.
+- For image tasks, do not invent an image filename.
+- For replanning, change capability/strategy after a non-transient capability failure.
+- Invalid arguments may be repaired only according to the exact tool schema.
+- Never turn a failed execution into evidence or a final answer.
+
+MULTI-HOP:
+
+retrieve -> inspect/extract -> calculate if necessary -> verify -> final
+
+Return only a valid PlanSchema.
+""".strip()
+
+    def _format_available_files(self) -> str:
+        if not self.available_files:
+            return "No local data files were detected."
+
+        return "\n".join(
+            f"- {name}"
+            for name in self.available_files
+        )
+
+    def _format_tools(self) -> str:
+        if not self.available_tools:
+            return "No tools available."
+
+        blocks = []
+
+        for name, tool in self.available_tools.items():
+            schema = (
+                getattr(tool, "arguments_schema", None)
+                or getattr(tool, "inputs", None)
+                or {}
+            )
+
+            description = getattr(
+                tool,
+                "description",
+                "",
+            )
+
+            blocks.append(
+                "\n".join(
+                    [
+                        f"TOOL: {name}",
+                        f"DESCRIPTION: {description}",
+                        "ARGUMENT SCHEMA:",
+                        json.dumps(
+                            schema,
+                            ensure_ascii=False,
+                            indent=2,
+                            default=str,
+                        ),
+                    ]
+                )
+            )
+
+        return (
+            "\n\n".join(blocks)
+            or "No valid tools available."
+        )
+
+    def _format_context(
+        self,
+        context: Sequence[Any] | None,
+    ) -> str:
+        if not context:
+            return "No additional context."
+
+        formatted = []
+
+        for item in list(context)[
+            -self.MAX_CONTEXT_ITEMS:
+        ]:
+            try:
+                if hasattr(item, "model_dump"):
+                    item = item.model_dump()
+                elif hasattr(item, "dict"):
+                    item = item.dict()
+
+                formatted.append(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                )
+
+            except Exception:
+                formatted.append(str(item))
+
+        return "\n".join(
+            f"- {item}"
+            for item in formatted
+        )
+
+    def _normalize_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        spec = self.available_tools.get(tool_name)
+
+        inputs = (
+            getattr(spec, "arguments_schema", None)
+            or getattr(spec, "inputs", None)
+            or {}
+        )
+
+        if not isinstance(inputs, dict):
+            return dict(arguments)
+
+        aliases = {
+            "q": "query",
+            "search": "query",
+            "search_query": "query",
+            "search_term": "query",
+            "link": "url",
+            "webpage": "url",
+            "page_url": "url",
+            "website": "url",
+            "file": "file_path",
+            "filepath": "file_path",
+            "filename": "file_path",
+            "path": "file_path",
+            "image": "image_path",
+            "image_file": "image_path",
+            "spreadsheet": "file_path",
+            "excel_path": "file_path",
+            "python_code": "code",
+            "script": "code",
         }
-        and has_excel
-        and failed_tool
-        != "analyze_excel"
-    ):
-        return {
-            "action": (
-                "Analyze the spreadsheet data"
+
+        out = dict(arguments)
+
+        for key, value in list(arguments.items()):
+            target = (
+                key
+                if key in inputs
+                else aliases.get(key)
+            )
+
+            if (
+                target in inputs
+                and target not in out
+            ):
+                out[target] = value
+
+        return out
+
+    def _validate_search_arguments(
+        self,
+        step: PlanStep,
+    ) -> None:
+        query = str(
+            (step.arguments or {}).get(
+                "query",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if not query:
+            raise ValueError(
+                "web_search requires a non-empty query."
+            )
+
+        if len(query.split()) > 15:
+            raise ValueError(
+                "web_search query is too long; "
+                "use concise factual keywords."
+            )
+
+        code_pattern = re.compile(
+            r"(?:"
+            r"\bimport\s+\w+"
+            r"|\bfrom\s+\w+\s+import\b"
+            r"|\bprint\s*\("
+            r"|\bmath\.\w+"
+            r"|\bresult\s*="
+            r"|\bpython\b"
+            r")",
+            re.IGNORECASE,
+        )
+
+        if code_pattern.search(query):
+            raise PlannerRecoveryRequired(
+                "Python/code detected in "
+                "web-search query."
+            )
+
+    def _extract_url(
+        self,
+        text: str,
+    ) -> str | None:
+        match = re.search(
+            r"https?://[^\s<>\"']+",
+            text or "",
+            re.IGNORECASE,
+        )
+
+        if not match:
+            return None
+
+        return match.group(0).rstrip(
+            ".,;:!?)]}"
+        )
+
+    def _build_search_query(
+        self,
+        user_question: str,
+    ) -> str:
+        text = re.sub(
+            r"https?://[^\s<>\"']+",
+            " ",
+            user_question or "",
+            flags=re.IGNORECASE,
+        )
+
+        words = re.findall(
+            r"[A-Za-z0-9][A-Za-z0-9_'/-]*",
+            text,
+        )
+
+        keywords = [
+            word
+            for word in words
+            if word.lower()
+            not in self._SEARCH_STOPWORDS
+        ]
+
+        return " ".join(
+            keywords[:10] or words[:10]
+        )
+
+    def _validate_question(
+        self,
+        user_question: str,
+    ) -> None:
+        if not isinstance(user_question, str):
+            raise TypeError(
+                "user_question must be a string."
+            )
+
+        if not user_question.strip():
+            raise ValueError(
+                "user_question cannot be empty."
+            )
+
+    def _classify(
+        self,
+        user_question: str,
+    ) -> TaskAnalysis:
+        return self.task_classifier.classify(
+            user_question
+        )
+
+    def _fingerprint_step(
+        self,
+        step: PlanStep,
+    ) -> str:
+        arguments = json.dumps(
+            step.arguments or {},
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
+
+        return "|".join(
+            [
+                str(step.step_type),
+                str(step.tool_name or ""),
+                step.action.strip().lower(),
+                arguments,
+            ]
+        )
+
+    def _strategy_family(
+        self,
+        step: PlanStep,
+    ) -> str:
+        if step.step_type == StepType.LLM:
+            return "LLM"
+
+        return self._STRATEGY_FAMILY.get(
+            step.tool_name or "",
+            f"TOOL:{step.tool_name or 'UNKNOWN'}",
+        )
+
+    def _get_failure_type(
+        self,
+        failure: AgentError,
+    ) -> str:
+        for attribute in (
+            "failure_type",
+            "error_type",
+            "code",
+            "reason",
+        ):
+            value = getattr(
+                failure,
+                attribute,
+                None,
+            )
+
+            if value:
+                return str(value)
+
+        return type(failure).__name__
+
+    def _has_successful_evidence(
+        self,
+        context: Sequence[Any] | None,
+    ) -> bool:
+        if not context:
+            return False
+
+        for item in context:
+            text = str(item).strip().lower()
+
+            if not text:
+                continue
+
+            failure_markers = (
+                "error",
+                "failed",
+                "failure",
+                "exception",
+                "timeout",
+                "blocked",
+            )
+
+            if not any(
+                marker in text
+                for marker in failure_markers
+            ):
+                return True
+
+        return False
+
+    def _tool_step(
+        self,
+        *,
+        action: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> PlanStep:
+        return PlanStep(
+            step_id=0,
+            action=action,
+            step_type=StepType.TOOL,
+            tool_name=tool_name,
+            arguments=arguments,
+            is_final_answer=False,
+        )
+
+    def _tool_and_final_plan(
+        self,
+        *,
+        action: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> PlanSchema:
+        tool_step = PlanStep(
+            step_id=0,
+            action=action,
+            step_type=StepType.TOOL,
+            tool_name=tool_name,
+            arguments=arguments,
+            is_final_answer=False,
+        )
+
+        final_step = PlanStep(
+            step_id=1,
+            action=(
+                "Use the verified tool result and "
+                "produce the final answer"
             ),
-            "tool_name": "analyze_excel",
-            "arguments": {
-                "file_path": target,
-                "question": user_question,
-            },
-        }
+            step_type=StepType.LLM,
+            tool_name=None,
+            arguments={},
+            is_final_answer=True,
+        )
 
-    if (
-        has_reader
-        and failed_tool
-        != "file_reader"
-    ):
-        return {
-            "action": (
-                "Read the local file"
-            ),
-            "tool_name": "file_reader",
-            "arguments": {
-                "file_path": target
-            },
-        }
+        return PlanSchema(
+            steps=[
+                tool_step,
+                final_step,
+            ]
+        )
 
-    return None
+    def _llm_only_plan(self) -> PlanSchema:
+        return PlanSchema(
+            steps=[
+                PlanStep(
+                    step_id=0,
+                    action=(
+                        "Use the available context and "
+                        "produce the final answer"
+                    ),
+                    step_type=StepType.LLM,
+                    tool_name=None,
+                    arguments={},
+                    is_final_answer=True,
+                )
+            ]
+        )
+
+    def _image_extensions(self) -> tuple[str, ...]:
+        return (
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".bmp",
+            ".tiff",
+            ".tif",
+        )
+
+    def _select_file(
+        self,
+        question: str,
+        extensions: Sequence[str],
+    ) -> str | None:
+        if not self.available_files:
+            return None
+
+        question_lower = question.lower()
+
+        candidates = []
+
+        for file_name in self.available_files:
+            path = Path(str(file_name))
+
+            if path.suffix.lower() not in extensions:
+                continue
+
+            candidates.append(path)
+
+        if not candidates:
+            return None
+
+        question_tokens = set(
+            re.findall(
+                r"[a-zA-Z0-9_-]+",
+                question_lower,
+            )
+        )
+
+        scored: list[tuple[int, Path]] = []
+
+        for path in candidates:
+            name_lower = path.name.lower()
+
+            score = sum(
+                1
+                for token in question_tokens
+                if token and token in name_lower
+            )
+
+            scored.append(
+                (score, path)
+            )
+
+        scored.sort(
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        best_score, best_path = scored[0]
+
+        if best_score <= 0 and len(scored) > 1:
+            return None
+
+        return str(best_path)
+
+    def _file_fallback_step(
+        self,
+        *,
+        user_question: str,
+        failed_tool: str | None,
+    ) -> dict[str, Any] | None:
+        if not self.available_files:
+            return None
+
+        question_lower = user_question.lower()
+
+        image_requested = any(
+            word in question_lower
+            for word in (
+                "image",
+                "picture",
+                "photo",
+                "screenshot",
+            )
+        )
+
+        spreadsheet_requested = any(
+            word in question_lower
+            for word in (
+                "excel",
+                "spreadsheet",
+                "xlsx",
+                "csv",
+            )
+        )
+
+        if image_requested:
+            if (
+                "analyze_image"
+                in self.available_tools
+                and failed_tool != "analyze_image"
+            ):
+                target = self._select_file(
+                    user_question,
+                    self._image_extensions(),
+                )
+
+                if target:
+                    return {
+                        "action": (
+                            "Analyze the provided image "
+                            "and extract the required information"
+                        ),
+                        "tool_name": "analyze_image",
+                        "arguments": {
+                            "image_path": target,
+                            "question": user_question,
+                        },
+                    }
+
+        if spreadsheet_requested:
+            if (
+                "analyze_excel"
+                in self.available_tools
+                and failed_tool != "analyze_excel"
+            ):
+                target = self._select_file(
+                    user_question,
+                    (
+                        ".xlsx",
+                        ".xls",
+                        ".csv",
+                    ),
+                )
+
+                if target:
+                    return {
+                        "action": (
+                            "Analyze the provided spreadsheet "
+                            "and extract the required information"
+                        ),
+                        "tool_name": "analyze_excel",
+                        "arguments": {
+                            "file_path": target,
+                            "question": user_question,
+                        },
+                    }
+
+        if (
+            "file_reader" in self.available_tools
+            and failed_tool != "file_reader"
+        ):
+            target = self._select_file(
+                user_question,
+                (
+                    ".txt",
+                    ".md",
+                    ".json",
+                    ".pdf",
+                    ".docx",
+                    ".csv",
+                    ".xlsx",
+                    ".xls",
+                ),
+            )
+
+            if target:
+                return {
+                    "action": (
+                        "Read the relevant provided "
+                        "file and extract the required information"
+                    ),
+                    "tool_name": "file_reader",
+                    "arguments": {
+                        "file_path": target,
+                    },
+                }
+
+        return None
+
+    def _repair_file_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        required_keys = self._FILE_PATH_ARGUMENT_TOOLS.get(
+            tool_name
+        )
+
+        if not required_keys:
+            return arguments
+
+        repaired = dict(arguments)
+
+        for key in required_keys:
+            value = repaired.get(key)
+
+            if value is None:
+                continue
+
+            if not isinstance(value, str):
+                continue
+
+            if is_placeholder_path(value):
+                raise PlannerRecoveryRequired(
+                    f"Placeholder path is not allowed "
+                    f"for '{tool_name}': {value!r}"
+                )
+
+            path = Path(value)
+
+            if path.is_absolute():
+                continue
+
+            base_path = Path(self.base_dir)
+
+            candidate = base_path / path
+
+            if candidate.exists():
+                repaired[key] = str(candidate)
+
+        return repaired
+
+    def _deterministic_fallback_code(
+        self,
+        question: str,
+    ) -> str | None:
+        factorial_ratio = detect_factorial_ratio(
+            question
+        )
+
+        if factorial_ratio:
+            left, right = factorial_ratio
+
+            return (
+                "import math\n"
+                f"left = math.factorial({left})\n"
+                f"right = math.factorial({right})\n"
+                "print(left / right)"
+            )
+
+        operation = detect_simple_operation(
+            question
+        )
+
+        if operation:
+            return (
+                f"result = {operation}\n"
+                "print(result)"
+            )
+
+        return None
 
 
 def detect_factorial_ratio(
-user_question: str,
+    user_question: str,
 ) -> tuple[int, int] | None:
-text = (
-user_question or ""
-).lower()
+    text = (user_question or "").lower()
 
-
-patterns = [
-    r"(\d+)\s*!?\s*/\s*(\d+)\s*!",
-    r"(\d+)\s*factorial\s*/\s*(\d+)\s*factorial",
-]
-
-for pattern in patterns:
-    match = re.search(
-        pattern,
-        text,
+    patterns = (
+        r"(\d+)\s*!\s*/\s*(\d+)\s*!",
+        r"(\d+)\s+factorial\s*/\s*(\d+)\s+factorial",
     )
 
-    if match:
-        return (
-            int(match.group(1)),
-            int(match.group(2)),
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
         )
 
-return None
+        if match:
+            return (
+                int(match.group(1)),
+                int(match.group(2)),
+            )
+
+    return None
 
 
 def detect_simple_operation(
-user_question: str,
+    user_question: str,
 ) -> str | None:
-text = (
-user_question or ""
-).strip()
+    text = (user_question or "").strip()
 
-
-patterns = [
-    r"(?<!\w)(\d+(?:\.\d+)?)\s*([+\-*/])\s*(\d+(?:\.\d+)?)(?!\w)",
-    r"(?<!\w)(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)(?!\w)",
-]
-
-for pattern in patterns:
-    match = re.search(
-        pattern,
-        text,
-        re.IGNORECASE,
+    patterns = (
+        r"(?<!\w)"
+        r"(\d+(?:\.\d+)?)"
+        r"\s*"
+        r"([+\-*/])"
+        r"\s*"
+        r"(\d+(?:\.\d+)?)"
+        r"(?!\w)",
+        r"(?<!\w)"
+        r"(\d+(?:\.\d+)?)"
+        r"\s*x\s*"
+        r"(\d+(?:\.\d+)?)"
+        r"(?!\w)",
     )
 
-    if not match:
-        continue
+    for index, pattern in enumerate(patterns):
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
 
-    left = match.group(1)
-    operator = match.group(2)
-    right = match.group(3)
+        if not match:
+            continue
 
-    if operator.lower() == "x":
-        operator = "*"
+        if index == 0:
+            op = match.group(2)
+            left = match.group(1)
+            right = match.group(3)
+        else:
+            op = "*"
+            left = match.group(1)
+            right = match.group(2)
 
-    return (
-        f"{left} {operator} {right}"
-    )
+        return f"{left} {op} {right}"
 
-return None
+    return None
 

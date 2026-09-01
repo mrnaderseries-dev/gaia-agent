@@ -17,7 +17,6 @@ class RetryDecision:
 
 
 class RetryPolicy:
-
     def __init__(
         self,
         *,
@@ -25,7 +24,6 @@ class RetryPolicy:
         base_delay: float = 1.0,
         max_delay: float = 30.0,
     ) -> None:
-
         if max_attempts <= 0:
             raise ValueError(
                 "max_attempts must be greater than 0."
@@ -49,19 +47,15 @@ class RetryPolicy:
         self,
         classification: FailureClassification,
         *,
-        current_attempt: int = 0,
+        current_attempt: int,
     ) -> RetryDecision:
 
-        if current_attempt < 0:
+        if current_attempt <= 0:
             raise ValueError(
-                "current_attempt cannot be negative."
+                "current_attempt must be greater than 0."
             )
 
-        if (
-            classification.failure_type
-            != FailureType.TRANSIENT
-        ):
-
+        if classification.failure_type is not FailureType.TRANSIENT:
             return RetryDecision(
                 should_retry=False,
                 max_attempts=self.max_attempts,
@@ -70,7 +64,6 @@ class RetryPolicy:
             )
 
         if current_attempt >= self.max_attempts:
-
             return RetryDecision(
                 should_retry=False,
                 max_attempts=self.max_attempts,
@@ -79,7 +72,7 @@ class RetryPolicy:
             )
 
         delay = min(
-            self.base_delay * (2 ** current_attempt),
+            self.base_delay * (2 ** (current_attempt - 1)),
             self.max_delay,
         )
 
@@ -87,8 +80,5 @@ class RetryPolicy:
             should_retry=True,
             max_attempts=self.max_attempts,
             delay=delay,
-            reason=(
-                "Failure is transient and can be retried."
-            ),
+            reason="Failure is transient and can be retried.",
         )
-    

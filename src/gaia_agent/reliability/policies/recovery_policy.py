@@ -21,13 +21,11 @@ class RecoveryDecision:
 
 
 class RecoveryPolicy:
-
     def __init__(
         self,
         *,
         allow_replan: bool = True,
     ) -> None:
-
         self.allow_replan = allow_replan
 
     def evaluate(
@@ -35,18 +33,13 @@ class RecoveryPolicy:
         classification: FailureClassification,
     ) -> RecoveryDecision:
 
-        if classification.failure_type == FailureType.FATAL:
-
+        if classification.failure_type is FailureType.FATAL:
             return RecoveryDecision(
                 action=RecoveryAction.STOP,
-                reason=(
-                    "Fatal failure requires "
-                    "execution to stop."
-                ),
+                reason="Fatal failure requires execution to stop.",
             )
 
-        if classification.failure_type == FailureType.PERMANENT:
-
+        if classification.failure_type is FailureType.PERMANENT:
             return RecoveryDecision(
                 action=RecoveryAction.STOP,
                 reason=(
@@ -55,37 +48,30 @@ class RecoveryPolicy:
                 ),
             )
 
-        if classification.failure_type == FailureType.TRANSIENT:
-
+        if classification.failure_type is FailureType.TRANSIENT:
             return RecoveryDecision(
                 action=RecoveryAction.STOP,
                 reason=(
-                    "Transient failure should be "
-                    "handled by RetryPolicy."
+                    "Transient failure should be handled "
+                    "by RetryPolicy."
                 ),
             )
 
-        if classification.failure_type == FailureType.RECOVERABLE:
-
-            if self.allow_replan:
-
+        if classification.failure_type is FailureType.RECOVERABLE:
+            if not self.allow_replan:
                 return RecoveryDecision(
-                    action=RecoveryAction.REPLAN,
-                    reason=(
-                        "Failure may be recovered "
-                        "through replanning."
-                    ),
+                    action=RecoveryAction.STOP,
+                    reason="Replanning is disabled.",
                 )
 
             return RecoveryDecision(
-                action=RecoveryAction.STOP,
-                reason="Replanning is disabled.",
+                action=RecoveryAction.REPLAN,
+                reason=(
+                    "Failure may be recovered through replanning."
+                ),
             )
 
         return RecoveryDecision(
             action=RecoveryAction.STOP,
-            reason=(
-                "Unknown failure cannot be "
-                "recovered safely."
-            ),
+            reason="Unknown failure cannot be recovered safely.",
         )

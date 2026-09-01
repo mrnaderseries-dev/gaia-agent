@@ -12,48 +12,65 @@ class RecoveryResult:
     result: Any | None = None
     error: AgentError | None = None
     reason: str = ""
+    changed: bool = False
 
 
 class Recovery:
-
     async def execute(
         self,
         *,
         error: AgentError,
         operation: Callable[[AgentError], Awaitable[Any]],
+        change_detector: Callable[[Any], bool] | None = None,
     ) -> RecoveryResult:
+   
 
         try:
-
-            # Recovery callbacks are shaped like
-            #   async def recover(error: AgentError) -> Any
-            # so the AgentError must be forwarded.
             result = await operation(error)
+
+            changed = True
+
+            if change_detector is not None:
+                try:
+                    changed = bool(change_detector(result))
+                except Exception as exc:
+                    recovery_error = AgentError(
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                        source="recovery",
+                        operation="change_detection",
+                        recoverable=False,
+                        original_exception=exc,
+                    )
+
+                    return RecoveryResult(
+                        recovered=False,
+                        error=recovery_error,
+                        reason=(
+                            "Recovery succeeded but change validation failed."
+                        ),
+                        changed=False,
+                    )
+
+            if not changed:
+                return RecoveryResult(
+                    recovered=False,
+                    result=result,
+                    reason=(
+                        "Recovery produced no meaningful change; "
+                        "replanning would repeat the same execution."
+                    ),
+                    changed=False,
+                )
 
             return RecoveryResult(
                 recovered=True,
                 result=result,
-                reason="Recovery succeeded.",
+                reason="Recovery succeeded with a meaningful change.",
+                changed=True,
             )
 
         except Exception as exc:
-
-            # ---------------------------------------------------------
-            # IMPORTANT: AgentError is a frozen dataclass, NOT an
-            # Exception subclass. `except AgentError:` used to raise
-            #   TypeError: catching classes that do not inherit from
-            #   BaseException is not allowed
-            # whenever a recovery callback failed, which silently
-            # destroyed the real error and killed every replan.
-            # ---------------------------------------------------------
-            if isinstance(exc, AgentError):
-
-                return RecoveryResult(
-                    recovered=False,
-                    error=exc,
-                    reason=exc.message,
-                )
-
             recovery_error = AgentError(
                 error_type=type(exc).__name__,
                 message=str(exc),
@@ -67,4 +84,5 @@ class Recovery:
                 recovered=False,
                 error=recovery_error,
                 reason=str(exc),
+                changed=False,
             )

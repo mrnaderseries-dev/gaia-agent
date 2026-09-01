@@ -86,8 +86,7 @@ class Retry:
                 )
 
             except Exception as exc:
-                # Normalize exceptions to AgentError without violating
-                # the frozen dataclass contract (replace(), never mutate).
+        
                 if isinstance(exc, AgentError):
                     last_error = replace(
                         exc,
@@ -98,12 +97,11 @@ class Retry:
                         exc, source="retry", operation="execute", attempt=attempts
                     )
 
-                # إذا كان الخطأ غير قابل لإعادة المحاولة، نتوقف فوراً لتوفير الوقت
                 if not last_error.retryable:
                     break
 
             if attempts < max_attempts and current_delay > 0:
-                # إضافة عشوائية بسيطة (Jitter) لمنع تداخل الطلبات المتزامنة
+           
                 jitter = random.uniform(0, 0.1 * current_delay)
                 sleep_time = min(current_delay + jitter, max_delay)
                 
