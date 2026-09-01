@@ -6,6 +6,7 @@ from gaia_agent.core.policies.termination import (
     TerminationDecision,
     TerminationPolicy,
     TerminationState,
+    TerminationReason,
 )
 
 
@@ -15,11 +16,17 @@ class AgentLoop:
         self,
         *,
         orchestrator: Orchestrator,
-        termination_policy: TerminationPolicy,
+        termination_policy: TerminationPolicy | None = None,
+        max_iterations: int | None = None,
     ) -> None:
 
         self.orchestrator = orchestrator
-        self.termination_policy = termination_policy
+        if termination_policy is not None:
+            self.termination_policy = termination_policy
+        else:
+        
+            self.termination_policy = termination_policy 
+        self.max_iterations = max_iterations
         self._state: AgentState | None = None
 
     async def run(
@@ -43,6 +50,8 @@ class AgentLoop:
         self.orchestrator.bind_state(state)
         self.orchestrator.emit_agent_started()
 
+        termination = None
+
         while True:
 
             termination = self.check_termination()
@@ -50,12 +59,10 @@ class AgentLoop:
             if termination.should_stop:
                 break
 
-            # الحل الجذري: التحقق مما إذا كانت الخطة فارغة أو انتهت، وإعادة توليدها عبر الأوركسترايتر
             if not getattr(state, "plan", None) or len(state.plan) == 0:
                 if hasattr(self.orchestrator, "generate_initial_plan"):
                     await self.orchestrator.generate_initial_plan()
                 elif hasattr(self.orchestrator, "plan"):
-                    # محاولة بديلة حسب هيكل الأوركسترايتر لديك إذا وجد
                     pass
 
             await self.orchestrator.run_iteration()
@@ -75,7 +82,11 @@ class AgentLoop:
             print("final_answer_verified:", state.final_answer_verified)
             print("blocked:", state.blocked)
 
-        self.orchestrator.emit_agent_completed()
+        if termination and (
+            termination.reason == TerminationReason.COMPLETED
+            and state.final_answer_verified
+        ):
+            self.orchestrator.emit_agent_completed()
 
         return state
 
