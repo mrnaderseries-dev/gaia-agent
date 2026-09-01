@@ -47,7 +47,7 @@ _STRONG_TOOL_NAMES = frozenset(
         "analyze_excel",
         "file_reader",
         "analyze_image",
-       
+        "web_search",
     }
 )
 
@@ -126,9 +126,14 @@ def evidence_supports_candidate(
         re.fullmatch(r"[\d\s.,+-]+", candidate)
     )
 
+    # Long natural-language answers are paraphrased by design; only
+    # short, specific answers (numbers, codes, names) can be matched
+    # against evidence deterministically.
     if not numeric_like and len(candidate.split()) > 3:
         return None
 
+    # A purely numeric candidate must be matched numerically, never as
+    # a substring ("2" would otherwise match any evidence text).
     if not numeric_like:
         lowered_candidate = candidate.lower()
         for text in evidence_texts:
@@ -189,6 +194,10 @@ def deterministic_verification(
 
     candidate_numbers = _extract_numbers(candidate)
     evidence_numbers = _extract_numbers(joined)
+
+    # ------------------------------------------------------------------
+    # Single-number candidate: strict numeric conflict detection.
+    # ------------------------------------------------------------------
     if len(candidate_numbers) == 1:
         candidate_value = candidate_numbers[0]
 
@@ -221,6 +230,10 @@ def deterministic_verification(
             "The evidence contains multiple or unrelated numbers; "
             "the numeric check is inconclusive."
         )
+
+    # ------------------------------------------------------------------
+    # Non-numeric candidate: verbatim containment check.
+    # ------------------------------------------------------------------
     normalized_candidate = re.sub(
         r"\s+", " ", candidate.lower()
     ).strip()
