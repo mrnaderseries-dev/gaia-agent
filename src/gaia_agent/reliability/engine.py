@@ -166,8 +166,7 @@ class ReliabilityEngine:
         if retry_budget <= 0:
             raise ValueError(
                 "max_attempts must be greater than 0."
-            )
-
+)
         if not isinstance(recovery_budget, int) or isinstance(
             recovery_budget, bool
         ):
