@@ -13,8 +13,8 @@ from gaia_agent.llm.model import LLMModel
 class VerificationResult(BaseModel):
     verified: bool = Field(
         description=(
-            "Whether the candidate answer is supported "
-            "by the available data."
+            "Whether the candidate answer is directly and "
+            "adequately supported by evidence relevant to the question."
         )
     )
     reason: str = Field(
@@ -27,9 +27,7 @@ class VerificationResult(BaseModel):
 class VerificationInput(BaseModel):
     question: str
     candidate_answer: str
-    raw_data: list[Any] = Field(
-        default_factory=list
-    )
+    raw_data: list[Any] = Field(default_factory=list)
 
 
 class VerificationStatus(str):
@@ -37,19 +35,15 @@ class VerificationStatus(str):
     FAIL = "fail"
     UNCERTAIN = "uncertain"
 
-
-# Tool names whose results are treated as strong computation/data
-# evidence. A single numeric value produced by these tools that
-# contradicts the candidate answer is a determinable failure.
 _STRONG_TOOL_NAMES = frozenset(
     {
         "python_interpreter",
         "analyze_excel",
         "file_reader",
         "analyze_image",
-       
     }
 )
+
 
 _NUMBER_RE = re.compile(
     r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
@@ -59,34 +53,103 @@ _NUMBER_RE = re.compile(
 def _extract_numbers(text: str) -> list[float]:
     if not text:
         return []
-    cleaned = re.sub(r"(?<=\d)[,](?=\d{3}(?!\d))", "", text)
+
+    cleaned = re.sub(
+        r"(?<=\d)[,](?=\d{3}(?!\d))",
+        "",
+        text,
+    )
+
     return [
         float(match.group(0))
         for match in _NUMBER_RE.finditer(cleaned)
     ]
 
 
-def _iter_strong_evidence(raw_data: list[Any]) -> list[str]:
-    """Collect result text from strong tool evidence records."""
-    texts: list[str] = []
+def _get_tool_name(item: Any) -> str | None:
+    if isinstance(item, dict):
+        value = item.get("tool_name")
+    else:
+        value = getattr(item, "tool_name", None)
+
+    if value is None:
+        return None
+
+    return str(value)
+
+
+def _get_result(item: Any) -> Any:
+    if isinstance(item, dict):
+        return item.get("result")
+
+    return getattr(item, "result", None)
+
+
+def _get_succeeded(item: Any) -> bool:
+    if isinstance(item, dict):
+        return bool(item.get("succeeded", True))
+
+    return bool(getattr(item, "succeeded", True))
+
+
+def _iter_strong_evidence(raw_data: list[Any]) -> list[Any]:
+    items: list[Any] = []
 
     for item in raw_data or []:
-        tool_name = getattr(item, "tool_name", None)
-        if tool_name is None:
+        tool_name = _get_tool_name(item)
+
+        if not tool_name:
             continue
+
         if tool_name == "llm":
             continue
+
         if tool_name not in _STRONG_TOOL_NAMES:
             continue
-        succeeded = getattr(item, "succeeded", True)
-        if not succeeded:
+
+        if not _get_succeeded(item):
             continue
-        result = getattr(item, "result", None)
+
+        result = _get_result(item)
+
         if result is None:
             continue
-        texts.append(str(result))
 
-    return texts
+        items.append(item)
+
+    return items
+
+
+def _iter_all_successful_evidence(
+    raw_data: list[Any],
+) -> list[tuple[str, str]]:
+    evidence: list[tuple[str, str]] = []
+
+    for item in raw_data or []:
+        tool_name = _get_tool_name(item)
+
+        if not tool_name:
+            continue
+
+        if tool_name == "llm":
+            continue
+
+        if not _get_succeeded(item):
+            continue
+
+        result = _get_result(item)
+
+        if result is None:
+            continue
+
+        evidence.append(
+            (
+                tool_name,
+                str(result),
+            )
+        )
+
+    return evidence
 
 
 def evidence_supports_candidate(
@@ -94,97 +157,122 @@ def evidence_supports_candidate(
     raw_data: list[Any],
 ) -> bool | None:
     """
-    Deterministic support gate applied AFTER the LLM judge says
-    "verified" (orchestrator STEP 8 hard gate).
-
-    The LLM must never be able to simply declare its own answer
-    verified when the gathered tool evidence does not contain it.
+    Determine whether strong deterministic evidence supports the
+    candidate answer.
 
     Returns:
+        True:
+            Strong evidence clearly supports the candidate.
 
-    - True  : the candidate is explicitly present in strong tool
-              evidence (verbatim text or exact numeric match).
-    - False : strong tool evidence exists but the candidate does NOT
-              appear in it -> the LLM verdict must NOT be trusted.
-    - None  : no strong tool evidence exists (or the candidate is a
-              long natural-language answer that cannot be matched
-              verbatim); nothing deterministic to check.
+        False:
+            Strong evidence clearly contradicts the candidate.
+
+        None:
+            Evidence is missing, ambiguous, or insufficient.
     """
-    candidate = str(candidate_answer or "").strip()
+    if candidate_answer is None:
+        return None
+
+    candidate = str(candidate_answer).strip()
 
     if not candidate:
-        return False
-
-    evidence_texts = _iter_strong_evidence(list(raw_data or []))
-
-    if not evidence_texts:
         return None
 
+    strong_items = list(_iter_strong_evidence(raw_data))
+
+    if not strong_items:
+        return None
+
+    # ------------------------------------------------------------
+    # Numeric candidate
+    # ------------------------------------------------------------
     candidate_numbers = _extract_numbers(candidate)
 
-    numeric_like = bool(
-        re.fullmatch(r"[\d\s.,+-]+", candidate)
-    )
+    if candidate_numbers:
+        candidate_number = candidate_numbers[0]
 
-    if not numeric_like and len(candidate.split()) > 3:
-        return None
+        all_numbers: list[float] = []
 
-    if not numeric_like:
-        lowered_candidate = candidate.lower()
-        for text in evidence_texts:
-            if lowered_candidate in text.lower():
-                return True
+        for item in strong_items:
+            result = _get_result(item)
 
-    if len(candidate_numbers) == 1:
-        value = candidate_numbers[0]
-        for text in evidence_texts:
-            for number in _extract_numbers(text):
-                if number == value:
-                    return True
+            if result is None:
+                continue
 
-    return False
+            all_numbers.extend(
+                _extract_numbers(str(result))
+            )
+
+        # Remove duplicates while preserving order.
+        distinct_numbers = list(dict.fromkeys(all_numbers))
+
+        # No numeric evidence.
+        if not distinct_numbers:
+            return None
+
+        # More than one distinct number means that we cannot
+        # deterministically identify which number is the answer.
+        if len(distinct_numbers) != 1:
+            return None
+
+        # Exactly one numeric value exists in the strong evidence.
+        return abs(candidate_number - distinct_numbers[0]) < 1e-9
+
+    # ------------------------------------------------------------
+    # Text candidate
+    # ------------------------------------------------------------
+    normalized_candidate = candidate.casefold()
+
+    for item in strong_items:
+        result = _get_result(item)
+
+        if result is None:
+            continue
+
+        text = str(result).casefold().strip()
+
+        if not text:
+            continue
+
+        if normalized_candidate in text:
+            return True
+
+    return None
 
 
 def deterministic_verification(
     candidate_answer: str,
     raw_data: list[Any],
 ) -> tuple[VerificationStatus, str]:
-    """
-    Independent, deterministic evidence check (STEP 7).
 
-    The candidate answer is checked against the actual tool evidence
-    BEFORE the LLM judge is consulted.
-
-    Returns PASS / FAIL / UNCERTAIN:
-
-    - PASS      : the candidate is explicitly present in strong
-                  evidence (verbatim text or an exact numeric match).
-    - FAIL      : a computation/data tool produced exactly one distinct
-                  numeric value and the candidate is a number that
-                  differs from it (e.g. evidence = 3, answer = 4).
-    - UNCERTAIN : no conflict detected, but no direct match either;
-                  the LLM judge still has to decide.
-    """
     if candidate_answer is None:
-        return VerificationStatus.FAIL, (
-            "Candidate answer is missing."
+        return (
+            VerificationStatus.FAIL,
+            "Candidate answer is missing.",
         )
 
     candidate = str(candidate_answer).strip()
 
     if not candidate:
-        return VerificationStatus.FAIL, (
-            "Candidate answer is empty."
+        return (
+            VerificationStatus.FAIL,
+            "Candidate answer is empty.",
         )
 
-    evidence_texts = _iter_strong_evidence(raw_data)
+    strong_evidence = _iter_strong_evidence(
+        list(raw_data or [])
+    )
 
-    if not evidence_texts:
-        return VerificationStatus.UNCERTAIN, (
-            "No strong tool evidence is available for "
-            "an independent deterministic check."
+    if not strong_evidence:
+        return (
+            VerificationStatus.UNCERTAIN,
+            (
+                "No strong deterministic tool evidence is "
+                "available for independent verification."
+            ),
         )
 
+    evidence_texts = [str(_get_result(item)) for item in strong_evidence]
     joined = "\n".join(evidence_texts)
 
     candidate_numbers = _extract_numbers(candidate)
@@ -192,72 +280,90 @@ def deterministic_verification(
     if len(candidate_numbers) == 1:
         candidate_value = candidate_numbers[0]
 
-        if evidence_numbers:
-            distinct = sorted(set(evidence_numbers))
-            if len(distinct) == 1:
-                evidence_value = distinct[0]
-                if abs(candidate_value - evidence_value) < 1e-9:
-                    return VerificationStatus.PASS, (
+        if not evidence_numbers:
+            return (
+                VerificationStatus.UNCERTAIN,
+                (
+                    "The candidate is numeric, but the strong "
+                    "tool evidence contains no numeric value."
+                ),
+            )
+
+        distinct = sorted(set(evidence_numbers))
+
+        if len(distinct) == 1:
+            evidence_value = distinct[0]
+
+            if abs(candidate_value - evidence_value) < 1e-9:
+                return (
+                    VerificationStatus.PASS,
+                    (
                         "The candidate number matches the single "
-                        "numeric value in the tool evidence."
-                    )
-                return VerificationStatus.FAIL, (
-                    f"Numeric evidence conflict detected: the "
-                    f"tool/computation evidence contains "
-                    f"'{distinct[0]:g}', but the candidate answer is "
-                    f"'{candidate_value:g}'."
+                        "numeric value in deterministic tool evidence."
+                    ),
                 )
 
-            if any(
-                abs(candidate_value - value) < 1e-9
-                for value in distinct
-            ):
-                return VerificationStatus.PASS, (
-                    "The candidate number appears verbatim in "
-                    "the tool evidence."
-                )
+            return (
+                VerificationStatus.FAIL,
+                (
+                    "Deterministic numeric evidence contradicts "
+                    f"the candidate: evidence={evidence_value:g}, "
+                    f"candidate={candidate_value:g}."
+                ),
+            )
 
-        return VerificationStatus.UNCERTAIN, (
-            "The evidence contains multiple or unrelated numbers; "
-            "the numeric check is inconclusive."
+        return (
+            VerificationStatus.UNCERTAIN,
+            (
+                "The deterministic evidence contains multiple "
+                "numeric values, so the correct answer cannot be "
+                "identified safely by numeric matching alone."
+            ),
         )
+
     normalized_candidate = re.sub(
-        r"\s+", " ", candidate.lower()
+        r"\s+",
+        " ",
+        candidate.lower(),
     ).strip()
+
     normalized_evidence = re.sub(
-        r"\s+", " ", joined.lower()
+        r"\s+",
+        " ",
+        joined.lower(),
     )
 
     if (
         normalized_candidate
         and normalized_candidate in normalized_evidence
     ):
-        return VerificationStatus.PASS, (
-            "The candidate answer appears verbatim in the "
-            "tool evidence."
+        return (
+            VerificationStatus.PASS,
+            (
+                "The candidate answer appears directly in "
+                "deterministic tool evidence."
+            ),
         )
 
-    return VerificationStatus.UNCERTAIN, (
-        "No direct deterministic match or conflict was found; "
-        "the evidence-based judge must decide."
+    return (
+        VerificationStatus.UNCERTAIN,
+        (
+            "No direct deterministic match or contradiction "
+            "was found."
+        ),
     )
 
 
 class VerifierAgent:
     """
-    Verifies whether a candidate final answer is supported by
-    the information gathered during agent execution.
+    Strict final-answer verifier.
 
-    The verifier is a judge only.
-
-    It does NOT:
-    - generate a replacement answer
-    - modify the candidate answer
-    - execute tools
-    - perform recovery
-    - replan
-
-    It only returns a VerificationResult.
+    The verifier:
+    - does not generate a replacement answer
+    - does not execute tools
+    - does not replan
+    - does not perform recovery
+    - evaluates whether evidence actually supports the candidate
     """
 
     def __init__(
@@ -266,7 +372,6 @@ class VerifierAgent:
         client: LLMClient,
         model: LLMModel,
     ) -> None:
-
         self.client = client
         self.model = model
 
@@ -275,12 +380,76 @@ class VerifierAgent:
         data: VerificationInput,
     ) -> VerificationResult:
         """
-        Verify a candidate answer against the available raw data.
-        """
+        Verify the candidate answer.
 
-        messages = self._build_messages(
-            data
+        Verification pipeline:
+
+            1. Check whether evidence exists.
+            2. Run deterministic verification.
+            3. If deterministic PASS -> accept.
+            4. If deterministic FAIL -> reject.
+            5. If UNCERTAIN -> ask the LLM to judge relevance.
+            6. For web evidence, the LLM is allowed to make the
+               semantic relevance decision.
+            7. Never allow the LLM to verify an answer when there is
+               no successful evidence.
+        """
+        # ------------------------------------------------------------
+        # 1. Evidence must exist before we ask the LLM anything.
+        # ------------------------------------------------------------
+        successful_evidence = list(
+            _iter_all_successful_evidence(data.raw_data)
         )
+
+        if not successful_evidence:
+            return VerificationResult(
+                verified=False,
+                reason=(
+                    "Verification failed because no successful "
+                    "evidence is available."
+                ),
+            )
+
+        # ------------------------------------------------------------
+        # 2. Deterministic verification
+        # ------------------------------------------------------------
+        deterministic_status, deterministic_reason = (
+            deterministic_verification(
+                data.candidate_answer,
+                data.raw_data,
+            )
+        )
+
+        # ------------------------------------------------------------
+        # 3. Deterministic contradiction always wins.
+        # ------------------------------------------------------------
+        if deterministic_status == VerificationStatus.FAIL:
+            return VerificationResult(
+                verified=False,
+                reason=(
+                    "Deterministic verification rejected the "
+                    f"candidate: {deterministic_reason}"
+                ),
+            )
+
+        # ------------------------------------------------------------
+        # 4. Strong deterministic evidence is sufficient.
+        # ------------------------------------------------------------
+        if deterministic_status == VerificationStatus.PASS:
+            return VerificationResult(
+                verified=True,
+                reason=deterministic_reason,
+            )
+
+        # ------------------------------------------------------------
+        # 5. Deterministic verification is uncertain.
+        #
+        #    Now the LLM judges whether the QUESTION, CANDIDATE and
+        #    EVIDENCE actually correspond.
+        #
+        #    This is especially important for web_search evidence.
+        # ------------------------------------------------------------
+        messages = self._build_messages(data)
 
         result = await self.client.generate(
             messages=messages,
@@ -288,25 +457,46 @@ class VerifierAgent:
             output_schema=VerificationResult,
         )
 
-        if not isinstance(
-            result,
-            VerificationResult,
-        ):
+        # ------------------------------------------------------------
+        # 6. Validate LLM response.
+        # ------------------------------------------------------------
+        if not isinstance(result, VerificationResult):
             raise TypeError(
                 "LLMClient.generate() returned an invalid "
                 "verification result."
             )
 
-        return result
+        # ------------------------------------------------------------
+        # 7. LLM rejection means rejection.
+        # ------------------------------------------------------------
+        if not result.verified:
+            return VerificationResult(
+                verified=False,
+                reason=(
+                    "LLM verification rejected the candidate: "
+                    f"{result.reason}"
+                ),
+            )
+
+        # ------------------------------------------------------------
+        # 8. LLM accepted the evidence.
+        #
+        #    Web evidence is semantically verified by the LLM.
+        # ------------------------------------------------------------
+        return VerificationResult(
+            verified=True,
+            reason=(
+                "Candidate was verified by the LLM using the "
+                "available evidence: "
+                f"{result.reason}"
+            ),
+        )
 
     def _build_messages(
         self,
         data: VerificationInput,
     ) -> list[dict[str, str]]:
-        """
-        Build the messages sent to the verification LLM.
-        """
-
+        """Build the verifier messages."""
         return [
             {
                 "role": "system",
@@ -314,80 +504,96 @@ class VerifierAgent:
             },
             {
                 "role": "user",
-                "content": self._build_prompt(
-                    data
-                ),
+                "content": self._build_prompt(data),
             },
         ]
 
     @staticmethod
     def _system_prompt() -> str:
         """
-        System instructions for the verifier.
+        Strict verification policy.
 
-        The verifier must judge factual support only and must
-        not invent information.
+        The critical rule is that evidence must answer the question,
+        not merely contain the candidate value.
         """
-
         return (
-            "You are a strict answer verification agent.\n\n"
+            "You are a strict factual answer verification agent.\n\n"
 
-            "Your task is to determine whether the candidate "
-            "answer is supported by the provided information.\n\n"
+            "Your ONLY task is to determine whether the candidate "
+            "answer is supported by the provided evidence.\n\n"
 
-            "Rules:\n"
+            "CRITICAL RULES:\n"
+            "1. Evaluate the evidence against the EXACT question.\n"
+            "2. The evidence must actually support the answer to "
+            "the question.\n"
+            "3. The mere presence of the candidate value in the "
+            "evidence is NOT sufficient.\n"
+            "4. A number appearing in an unrelated web-search "
+            "result is NOT evidence for that number being the "
+            "answer.\n"
+            "5. Do not assume that the first, largest, smallest, "
+            "or most visible number in a source is the answer.\n"
+            "6. Do not infer facts that are not supported by the "
+            "provided evidence.\n"
+            "7. Do not use outside knowledge.\n"
+            "8. Do not rewrite or improve the candidate answer.\n"
+            "9. If the evidence is irrelevant, ambiguous, "
+            "insufficient, or contradictory, return verified=false.\n"
+            "10. If the question refers to a specific file, image, "
+            "audio recording, video, URL, table, or document, "
+            "evidence must correspond to that specific source.\n"
+            "11. For web-search evidence, verify that the retrieved "
+            "content actually addresses the question rather than "
+            "merely containing matching words or numbers.\n"
+            "12. Return verified=true ONLY when the evidence provides "
+            "a reasonable and direct factual basis for the candidate.\n"
+            "13. Single-word and exact-number answers are valid when "
+            "the evidence directly supports them.\n"
+            "14. When uncertain, prefer verified=false.\n\n"
 
-            "1. Verify the answer against the provided raw data.\n"
-
-            "2. Do not use unsupported assumptions.\n"
-
-            "3. Do not invent facts.\n"
-
-            "4. Do not rewrite or improve the candidate answer.\n"
-
-            "5. Return verified=true only when the candidate "
-            "answer is adequately supported by the available "
-            "information.\n"
-
-            "6. Return verified=false when the answer is "
-            "unsupported, contradicted, incomplete in a materially "
-            "important way, or otherwise unreliable.\n"
-
-            "7. Give a concise reason for the decision.\n"
-            "8. Single-word or exact-number answers are valid as long as they are factually supported by the raw data."
+            "Return a concise reason explaining the decision."
         )
 
     @staticmethod
     def _build_prompt(
         data: VerificationInput,
     ) -> str:
-        """
-        Build the user prompt containing the question,
-        candidate answer, and gathered data.
-        """
-
-        raw_data = "\n".join(
-            VerifierAgent._format_raw_item(
-                item
-            )
-            for item in data.raw_data
+        """Build the user prompt for the verification judge."""
+        evidence_items = _iter_all_successful_evidence(
+            data.raw_data
         )
 
-        if not raw_data:
-            raw_data = "(No raw data was provided.)"
+        if not evidence_items:
+            raw_data = "(No successful evidence was provided.)"
+        else:
+            chunks: list[str] = []
+
+            for index, (tool_name, result) in enumerate(
+                evidence_items,
+                start=1,
+            ):
+                chunks.append(
+                    f"Evidence {index} "
+                    f"(source tool: {tool_name}):\n"
+                    f"{result}"
+                )
+
+            raw_data = "\n\n".join(chunks)
 
         return (
             "Verify the following candidate answer.\n\n"
-
-            f"Question:\n{data.question}\n\n"
-
-            f"Candidate answer:\n{data.candidate_answer}\n\n"
-
-            "Available raw data:\n"
+            f"QUESTION:\n{data.question}\n\n"
+            f"CANDIDATE ANSWER:\n{data.candidate_answer}\n\n"
+            "EVIDENCE:\n"
             f"{raw_data}\n\n"
-
-            "Determine whether the candidate answer is supported "
-            "by the available raw data."
+            "Decision requirements:\n"
+            "- Does the evidence actually answer the question?\n"
+            "- Is the candidate supported by that evidence?\n"
+            "- Is the evidence about the specific source referenced "
+            "by the question?\n"
+            "- Is there any contradiction or material uncertainty?\n\n"
+            "Return verified=true only if the evidence directly "
+            "supports the candidate answer."
         )
 
     @staticmethod
@@ -395,10 +601,10 @@ class VerifierAgent:
         item: Any,
     ) -> str:
         """
-        Convert an arbitrary raw-data item into a safe textual
-        representation for the verifier prompt.
-        """
+        Convert arbitrary raw data to safe text.
 
+        Kept as a compatibility helper for existing callers/tests.
+        """
         if item is None:
             return "None"
 
@@ -410,7 +616,11 @@ class VerifierAgent:
 
         if isinstance(item, (dict, list, tuple, set)):
             try:
-                return json.dumps(item, default=str, indent=2)
+                return json.dumps(
+                    item,
+                    default=str,
+                    indent=2,
+                )
             except Exception:
                 return str(item)
 
