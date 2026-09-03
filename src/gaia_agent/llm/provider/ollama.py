@@ -4,14 +4,28 @@ from typing import Any, Sequence, TypeVar
 
 from pydantic import BaseModel
 
-from ..client import LLMClient
-from ..model import LLMModel
+from gaia_agent.llm.client import (
+    LLMClient,
+    Message,
+)
+from gaia_agent.llm.model import LLMModel
 from gaia_agent.observability.token_tracker import TokenTracker
+
 
 T = TypeVar("T", bound=BaseModel)
 
 
 class OllamaClient(LLMClient):
+    """
+    Ollama implementation of the provider-independent LLMClient.
+
+    Supports:
+
+    - normal text generation
+    - structured JSON output
+    - tool calling
+    - multimodal messages containing images
+    """
 
     def __init__(
         self,
@@ -23,7 +37,7 @@ class OllamaClient(LLMClient):
 
     async def generate(
         self,
-        messages: Sequence[dict[str, str]],
+        messages: Sequence[Message],
         *,
         model: LLMModel,
         output_schema: type[T] | None = None,
@@ -33,23 +47,24 @@ class OllamaClient(LLMClient):
 
         if model.provider.lower() != "ollama":
             raise ValueError(
-                f"OllamaClient cannot use provider '{model.provider}'."
+                "OllamaClient cannot use provider "
+                f"'{model.provider}'."
             )
+
+        normalized_messages = [
+            self._normalize_message(message)
+            for message in messages
+        ]
 
         payload: dict[str, Any] = {
             "model": model.model,
-            "messages": list(messages),
+            "messages": normalized_messages,
             "stream": False,
             "options": {
                 "temperature": model.temperature,
                 "num_predict": model.max_tokens,
-                # Keep the full planner prompt (tool contracts included):
-                # Ollama's default 2048 ctx silently truncates input,
-                # which caused hallucinated tool names.
                 "num_ctx": 8192,
             },
-            # Keep the model loaded between questions; reloading a local
-            # model per call stalls the evaluation run.
             "keep_alive": "60m",
         }
 
@@ -57,13 +72,23 @@ class OllamaClient(LLMClient):
             payload["tools"] = tools
 
         if output_schema is not None:
-            payload["format"] = output_schema.model_json_schema()
+            payload["format"] = (
+                output_schema.model_json_schema()
+            )
 
         payload.update(kwargs)
 
-        response = await self._request(payload)
+        response = await self._request(
+            payload
+        )
 
-        content = self._extract_content(response)
+        self._track_usage(
+            response
+        )
+
+        content = self._extract_content(
+            response
+        )
 
         if output_schema is None:
             return content
@@ -80,32 +105,128 @@ class OllamaClient(LLMClient):
 
         import httpx
 
-        async with httpx.AsyncClient(
-            base_url=self.base_url,
-            timeout=300.0,
-        ) as client:
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=300.0,
+            ) as client:
 
-            response = await client.post(
-                "/api/chat",
-                json=payload,
+                response = await client.post(
+                    "/api/chat",
+                    json=payload,
+                )
+
+                response.raise_for_status()
+
+                data = response.json()
+
+        except httpx.ConnectError as exc:
+            raise RuntimeError(
+                "Unable to connect to Ollama at "
+                f"{self.base_url}. "
+                "Make sure Ollama is running."
+            ) from exc
+
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                "Ollama returned HTTP "
+                f"{exc.response.status_code}: "
+                f"{exc.response.text}"
+            ) from exc
+
+        except httpx.RequestError as exc:
+            raise RuntimeError(
+                f"Ollama request failed: {exc}"
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                "Ollama returned an invalid JSON response."
             )
 
-            response.raise_for_status()
+        return data
 
-            return response.json()
+    @staticmethod
+    def _normalize_message(
+        message: Message,
+    ) -> dict[str, Any]:
 
+        if not isinstance(message, dict):
+            raise TypeError(
+                "Every LLM message must be a dictionary."
+            )
+
+        role = message.get("role")
+        content = message.get("content")
+
+        if not isinstance(role, str):
+            raise ValueError(
+                "LLM message is missing a valid 'role'."
+            )
+
+        if not isinstance(content, str):
+            raise ValueError(
+                "Ollama chat messages require string "
+                "'content'."
+            )
+
+        normalized: dict[str, Any] = {
+            "role": role,
+            "content": content,
+        }
+
+        images = message.get("images")
+
+        if images is not None:
+            if not isinstance(images, list):
+                raise TypeError(
+                    "Message 'images' must be a list."
+                )
+
+            normalized["images"] = [
+                str(image)
+                for image in images
+            ]
+
+  
+        for key in (
+            "name",
+            "tool_calls",
+            "tool_call_id",
+        ):
+            if key in message:
+                normalized[key] = message[key]
+
+        return normalized
     @staticmethod
     def _extract_content(
         response: dict[str, Any],
     ) -> str:
 
         try:
-            return response["message"]["content"]
+            message = response["message"]
+            content = message["content"]
+
         except (KeyError, TypeError) as exc:
             raise ValueError(
-                "Invalid Ollama response: missing message.content"
+                "Invalid Ollama response: missing "
+                "message.content"
             ) from exc
 
+        if not isinstance(content, str):
+            raise ValueError(
+                "Invalid Ollama response: "
+                "message.content is not a string."
+            )
+
+        content = content.strip()
+
+        if not content:
+            raise ValueError(
+                "Ollama returned an empty response."
+            )
+
+        return content
     @staticmethod
     def _parse_structured_output(
         content: str,
@@ -113,8 +234,55 @@ class OllamaClient(LLMClient):
     ) -> T:
 
         try:
-            return output_schema.model_validate_json(content)
+            return output_schema.model_validate_json(
+                content
+            )
+
         except Exception as exc:
             raise ValueError(
-                f"Failed to parse LLM output as {output_schema.__name__}: {content}"
+                "Failed to parse Ollama output as "
+                f"{output_schema.__name__}: {content}"
             ) from exc
+    def _track_usage(
+        self,
+        response: dict[str, Any],
+    ) -> None:
+     
+        if self.token_tracker is None:
+            return
+        prompt_tokens = response.get(
+            "prompt_eval_count"
+        )
+        completion_tokens = response.get(
+            "eval_count"
+        )
+        if not isinstance(
+            prompt_tokens,
+            int,
+        ):
+            prompt_tokens = 0
+        if not isinstance(
+            completion_tokens,
+            int,
+        ):
+            completion_tokens = 0
+        total_tokens = (
+            prompt_tokens
+            + completion_tokens
+        )
+        tracker = self.token_tracker
+        record_method = getattr(
+            tracker,
+            "record",
+            None,
+        )
+
+        if callable(record_method):
+            try:
+                record_method(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                )
+            except TypeError:
+                pass

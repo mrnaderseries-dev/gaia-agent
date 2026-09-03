@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
 from smolagents import Tool
 
@@ -13,7 +13,12 @@ except ImportError:
 
 class AudioTools:
     """
-    Audio and YouTube transcription tools container optimized for GAIA benchmark evaluation.
+    Audio/media tools.
+
+    Currently this container exposes YouTube transcript extraction
+    when supported by the installed smolagents version.
+
+    Local audio STT is intentionally not faked here.
     """
 
     def __init__(
@@ -26,14 +31,10 @@ class AudioTools:
         self.base_dir = Path(base_dir).resolve()
         self.model = model
 
-    def get_tools(self) -> List[Tool]:
-        """
-        Create and return all audio and YouTube tools.
-        """
-        tools = []
-        
-     
+    def get_tools(self) -> list[Tool]:
+        tools: list[Tool] = []
+
         if YoutubeTranscriptTool is not None:
             tools.append(YoutubeTranscriptTool())
-            
+
         return tools

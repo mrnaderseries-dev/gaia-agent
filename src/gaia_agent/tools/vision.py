@@ -1,56 +1,71 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from smolagents import Tool
 
+from gaia_agent.llm.service import LLMService
 from gaia_agent.tools.path_utils import (
     is_placeholder_path,
     resolve_file,
 )
 
 
+SUPPORTED_IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".bmp",
+    ".gif",
+}
+
+
 class AnalyzeImageTool(Tool):
+    """
+    Analyze a local image using the configured multimodal LLM.
+    """
 
     name = "analyze_image"
 
     description = (
-        "Analyze an image, chart, diagram, or visual "
-        "and answer a question using only visible information."
+        "Analyze an image, chart, chess board, or diagram and "
+        "answer a question using only the visual information "
+        "contained in the image."
     )
 
     inputs = {
         "image_path": {
             "type": "string",
-            "description": "Image filename or path.",
+            "description": (
+                "Path to the image relative to the allowed "
+                "base directory or filename."
+            ),
         },
         "question": {
             "type": "string",
-            "description": "Question about the image.",
+            "description": (
+                "Question that should be answered using "
+                "the image."
+            ),
         },
     }
 
     output_type = "string"
 
-    SUPPORTED_EXTENSIONS = {
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".webp",
-        ".bmp",
-        ".gif",
-    }
-
     def __init__(
         self,
-        model: Any = None,
+        llm_service: LLMService,
         base_dir: str = ".",
     ) -> None:
-
         super().__init__()
 
-        self.model = model
+        if llm_service is None:
+            raise ValueError(
+                "AnalyzeImageTool requires an LLMService."
+            )
+
+        self.llm_service = llm_service
         self.base_dir = Path(
             base_dir
         ).resolve()
@@ -61,82 +76,134 @@ class AnalyzeImageTool(Tool):
         question: str,
     ) -> str:
 
-        if is_placeholder_path(image_path):
-            raise ValueError(
-                "Image path is a placeholder or invalid."
+        try:
+
+            if not isinstance(
+                image_path,
+                str,
+            ) or not image_path.strip():
+
+                return (
+                    "Error: image_path must be a "
+                    "non-empty string."
+                )
+
+            if not isinstance(
+                question,
+                str,
+            ) or not question.strip():
+
+                return (
+                    "Error: question must be a "
+                    "non-empty string."
+                )
+
+            if is_placeholder_path(
+                image_path
+            ):
+                return (
+                    f"Error: Image path '{image_path}' "
+                    "is a placeholder or invalid."
+                )
+
+            path = resolve_file(
+                self.base_dir,
+                image_path,
             )
 
-        path = resolve_file(
-            self.base_dir,
-            image_path,
-        )
+            if path is None:
+                return (
+                    f"Error: Image '{image_path}' was not "
+                    "found in the allowed search locations."
+                )
 
-        if path is None:
-            raise FileNotFoundError(
-                f"Image not found: {image_path}"
+            if not path.exists():
+                return (
+                    f"Error: Image '{image_path}' does not exist."
+                )
+
+            if not path.is_file():
+                return (
+                    f"Error: '{image_path}' is not a file."
+                )
+
+            extension = path.suffix.lower()
+
+            if extension not in SUPPORTED_IMAGE_EXTENSIONS:
+                return (
+                    f"Error: Unsupported image format "
+                    f"'{extension}'. Supported formats: "
+                    f"{', '.join(sorted(SUPPORTED_IMAGE_EXTENSIONS))}."
+                )
+            prompt = (
+                "You are solving a GAIA benchmark task using "
+                "a visual input.\n\n"
+                "Analyze the provided image carefully.\n"
+                "Use ONLY information that is actually visible "
+                "in the image.\n"
+                "Do not invent missing information.\n"
+                "If the question requires reading text, numbers, "
+                "labels, a chart, a chess position, or a diagram, "
+                "inspect the image carefully before answering.\n\n"
+                f"Question:\n{question}\n\n"
+                "Return the most precise answer possible."
             )
 
-        if not path.is_file():
-            raise ValueError(
-                f"Not a file: {image_path}"
+            response = (
+                self.llm_service.generate_image_sync(
+                    image_path=path,
+                    question=prompt,
+                )
             )
 
-        if (
-            path.suffix.lower()
-            not in self.SUPPORTED_EXTENSIONS
-        ):
-            raise ValueError(
-                f"Unsupported image format: "
-                f"{path.suffix}"
+            answer = str(response).strip()
+
+            if not answer:
+                return (
+                    "Error: Vision model returned an empty "
+                    "response."
+                )
+
+            return answer
+
+        except FileNotFoundError as exc:
+            return f"Error: {exc}"
+
+        except Exception as exc:
+            return (
+                "Error analyzing image: "
+                f"{type(exc).__name__}: {exc}"
             )
-
-        if self.model is None:
-            raise RuntimeError(
-                "Image analysis requires a configured "
-                "vision-capable language model."
-            )
-
-        prompt = f"""
-Analyze the image for a GAIA benchmark task.
-
-Question:
-{question}
-
-Rules:
-- Use only information visible in the image.
-- Do not use outside knowledge.
-- Do not invent missing details.
-- Return only the answer.
-"""
-
-        return str(
-            self.model.generate(
-                prompt=prompt,
-                image=str(path),
-            )
-        )
 
 
 class VisionTools:
+    """
+    Container for vision-related tools.
+    """
 
     def __init__(
         self,
-        model: Any = None,
+        llm_service: LLMService,
         base_dir: str = ".",
     ) -> None:
 
-        self.model = model
+        if llm_service is None:
+            raise ValueError(
+                "VisionTools requires an LLMService."
+            )
+
+        self.llm_service = llm_service
         self.base_dir = Path(
             base_dir
         ).resolve()
 
-    def get_tools(self) -> list[Tool]:
+    def get_tools(
+        self,
+    ) -> list[Tool]:
 
         return [
             AnalyzeImageTool(
-                model=self.model,
-                base_dir=str(
-                    self.base_dir
-                ),
+                llm_service=self.llm_service,
+                base_dir=str(self.base_dir),
             )
         ]
