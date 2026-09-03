@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import csv
+import io
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
 from openpyxl import load_workbook
 from smolagents import Tool
@@ -16,28 +18,29 @@ class AnalyzeExcelTool(Tool):
     name = "analyze_excel"
 
     description = (
-        "Analyze an Excel workbook or spreadsheet according to a user's question. "
-        "The workbook data is extracted safely and passed to the configured language model."
+        "Analyze an Excel or CSV spreadsheet and answer "
+        "a question using only the spreadsheet contents."
     )
 
     inputs = {
         "file_path": {
             "type": "string",
-            "description": (
-                "Path to the Excel file relative to "
-                "the allowed base directory or filename."
-            ),
+            "description": "Spreadsheet filename or path.",
         },
         "question": {
             "type": "string",
-            "description": (
-                "Question that should be answered using "
-                "the Excel spreadsheet."
-            ),
+            "description": "Question to answer from the spreadsheet.",
         },
     }
 
     output_type = "string"
+
+    SUPPORTED_EXTENSIONS = {
+        ".xlsx",
+        ".xlsm",
+        ".csv",
+        ".tsv",
+    }
 
     def __init__(
         self,
@@ -45,13 +48,17 @@ class AnalyzeExcelTool(Tool):
         base_dir: str = ".",
     ) -> None:
         super().__init__()
-        self.model = model
-        self.base_dir = Path(base_dir).resolve()
 
-    def _read_excel(
+        self.model = model
+        self.base_dir = Path(
+            base_dir
+        ).resolve()
+
+    def _read_workbook(
         self,
         path: Path,
     ) -> str:
+
         workbook = load_workbook(
             filename=path,
             data_only=True,
@@ -59,26 +66,37 @@ class AnalyzeExcelTool(Tool):
         )
 
         try:
+
             output: list[str] = []
 
             for sheet in workbook.worksheets:
-                output.append(f"Sheet: {sheet.title}")
 
-                row_count = 0
-                for row in sheet.iter_rows(values_only=True):
-                    # تقييد الأسطر الكبيرة جداً لمنع تجاوز الـ Token Limit
-                    if row_count > 5000:
-                        output.append("... [Note: Spreadsheet truncated due to large size] ...")
+                output.append(
+                    f"Sheet: {sheet.title}"
+                )
+
+                for index, row in enumerate(
+                    sheet.iter_rows(
+                        values_only=True
+                    )
+                ):
+
+                    if index >= 5000:
+                        output.append(
+                            "[TRUNCATED]"
+                        )
                         break
 
                     values = [
-                        "" if value is None else str(value)
+                        "" if value is None
+                        else str(value)
                         for value in row
                     ]
-                    # تخطي الصفوف الفارغة تماماً
+
                     if any(values):
-                        output.append(" | ".join(values))
-                        row_count += 1
+                        output.append(
+                            " | ".join(values)
+                        )
 
                 output.append("")
 
@@ -87,103 +105,158 @@ class AnalyzeExcelTool(Tool):
         finally:
             workbook.close()
 
+    def _read_delimited(
+        self,
+        path: Path,
+    ) -> str:
+
+        delimiter = (
+            "\t"
+            if path.suffix.lower() == ".tsv"
+            else ","
+        )
+
+        content = path.read_text(
+            encoding="utf-8-sig"
+        )
+
+        rows = csv.reader(
+            io.StringIO(content),
+            delimiter=delimiter,
+        )
+
+        output: list[str] = []
+
+        for index, row in enumerate(rows):
+
+            if index >= 5000:
+                output.append(
+                    "[TRUNCATED]"
+                )
+                break
+
+            if any(cell.strip() for cell in row):
+                output.append(
+                    " | ".join(row)
+                )
+
+        return "\n".join(output)
+
+    def _extract(
+        self,
+        path: Path,
+    ) -> str:
+
+        suffix = path.suffix.lower()
+
+        if suffix in {
+            ".csv",
+            ".tsv",
+        }:
+            return self._read_delimited(path)
+
+        if suffix in {
+            ".xlsx",
+            ".xlsm",
+        }:
+            return self._read_workbook(path)
+
+        raise ValueError(
+            f"Unsupported spreadsheet format: {suffix}"
+        )
+
     def forward(
         self,
         file_path: str,
         question: str,
     ) -> str:
-        try:
-            if is_placeholder_path(file_path):
-                return (
-                    f"Error: File path '{file_path}' is a placeholder "
-                    "or invalid. You must use a real file path that "
-                    "exists in the environment."
-                )
 
-            path = resolve_file(self.base_dir, file_path)
+        if is_placeholder_path(file_path):
+            raise ValueError(
+                "Spreadsheet path is a placeholder "
+                "or invalid."
+            )
 
-            # البحث الذكي في حال لم يتم إيجاد الملف بالممسار المباشر (مثل باقي الأدوات)
-            if path is None or not path.exists():
-                filename = Path(file_path).name
-                possible_paths = [
-                    self.base_dir / filename,
-                    Path.cwd() / filename,
-                    Path.cwd() / "src" / filename,
-                    Path(file_path)
-                ]
-                
-                found = False
-                for p in possible_paths:
-                    if p.exists() and p.is_file():
-                        path = p.resolve()
-                        found = True
-                        break
-                
-                if not found:
-                    return f"Error: Excel file not found: {file_path} (searched in base_dir: {self.base_dir})"
+        path = resolve_file(
+            self.base_dir,
+            file_path,
+        )
 
-            if not path.is_file():
-                return f"Error: Not a file: {file_path}"
+        if path is None:
+            raise FileNotFoundError(
+                f"Spreadsheet not found: {file_path}"
+            )
 
-            valid_extensions = {
-                ".xlsx",
-                ".xlsm",
-                ".xls",
-                ".csv"
-            }
+        if not path.is_file():
+            raise ValueError(
+                f"Not a file: {file_path}"
+            )
 
-            if path.suffix.lower() not in valid_extensions:
-                return f"Unsupported Excel format: {path.suffix}"
+        if (
+            path.suffix.lower()
+            not in self.SUPPORTED_EXTENSIONS
+        ):
+            raise ValueError(
+                f"Unsupported spreadsheet format: "
+                f"{path.suffix}"
+            )
 
-            excel_data = self._read_excel(path)
+        data = self._extract(path)
 
-            if self.model is None:
-                return f"Excel fallback mock analysis for '{path.name}' regarding query: '{question}'."
+        if not data.strip():
+            raise ValueError(
+                f"Spreadsheet '{path.name}' "
+                "contains no readable data."
+            )
 
-            prompt = f"""
-You are analyzing an Excel spreadsheet to solve a GAIA benchmark evaluation task.
+        if self.model is None:
+            raise RuntimeError(
+                "Excel analysis requires a configured "
+                "language model."
+            )
 
-User question:
+        prompt = f"""
+You are solving a GAIA benchmark task.
+
+Question:
 {question}
 
-Excel data:
-{excel_data}
+Spreadsheet contents:
+{data}
 
-Instructions:
-- Answer the user's question accurately using the spreadsheet data.
+Rules:
+- Answer only from the spreadsheet.
 - Do not invent information.
-- If the spreadsheet does not contain enough information, say that the required information is unavailable.
-- Return only the requested clear and concise answer.
+- If the spreadsheet does not contain enough information,
+  explicitly state that.
+- Return only the answer.
 """
 
-            answer = self.model.generate(prompt)
-
-            return str(answer)
-
-        except Exception as exc:
-            return f"Excel analysis error: {exc}"
+        return str(
+            self.model.generate(prompt)
+        )
 
 
 class ExcelTools:
-    """
-    Excel tools container optimized for GAIA benchmark evaluation across 20 diverse test cases.
-    """
 
     def __init__(
         self,
         model: Any = None,
         base_dir: str = ".",
     ) -> None:
-        self.model = model
-        self.base_dir = Path(base_dir).resolve()
 
-    def get_tools(self) -> List[Tool]:
-        """
-        Create and return all Excel tools.
-        """
+        self.model = model
+        self.base_dir = Path(
+            base_dir
+        ).resolve()
+
+    def get_tools(self) -> list[Tool]:
+
         return [
             AnalyzeExcelTool(
                 model=self.model,
-                base_dir=str(self.base_dir),
+                base_dir=str(
+                    self.base_dir
+                ),
             )
         ]
