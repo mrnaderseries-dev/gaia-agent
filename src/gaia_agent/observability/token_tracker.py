@@ -1,73 +1,70 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import defaultdict
 from threading import Lock
 from typing import DefaultDict
-from collections import defaultdict
 
-
-@dataclass(frozen=True, slots=True)
-class TokenUsage:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-
-    @property
-    def total_tokens(self) -> int:
-        return self.prompt_tokens + self.completion_tokens
+from gaia_agent.llm.usage import TokenUsage
 
 
 class TokenTracker:
+    """
+    Thread-safe, provider-independent token usage tracker.
+
+    The tracker receives normalized TokenUsage objects.
+    It does not know anything about Ollama, OpenAI, Anthropic,
+    or provider-specific response fields.
+    """
 
     def __init__(self) -> None:
-        self._usage: DefaultDict[str, TokenUsage] = defaultdict(
-            TokenUsage
-        )
+        self._usage: DefaultDict[str, TokenUsage] = defaultdict(TokenUsage)
         self._lock = Lock()
 
     def record(
         self,
         operation: str,
         *,
-        prompt_tokens: int = 0,
-        completion_tokens: int = 0,
+        usage: TokenUsage,
     ) -> None:
+        """
+        Record normalized token usage for an operation.
+        """
 
-        if prompt_tokens < 0:
-            raise ValueError(
-                "prompt_tokens cannot be negative."
-            )
+        if not operation:
+            raise ValueError("operation must not be empty")
 
-        if completion_tokens < 0:
-            raise ValueError(
-                "completion_tokens cannot be negative."
-            )
+        if usage.prompt_tokens < 0:
+            raise ValueError("prompt_tokens must be >= 0")
+
+        if usage.completion_tokens < 0:
+            raise ValueError("completion_tokens must be >= 0")
 
         with self._lock:
             current = self._usage[operation]
 
             self._usage[operation] = TokenUsage(
                 prompt_tokens=(
-                    current.prompt_tokens
-                    + prompt_tokens
+                    current.prompt_tokens + usage.prompt_tokens
                 ),
                 completion_tokens=(
-                    current.completion_tokens
-                    + completion_tokens
+                    current.completion_tokens + usage.completion_tokens
                 ),
             )
 
-    def get_usage(
-        self,
-        operation: str,
-    ) -> TokenUsage:
+    def get(self, operation: str) -> TokenUsage:
+        """
+        Return accumulated usage for one operation.
+        """
 
         with self._lock:
-            return self._usage[operation]
+            return self._usage.get(operation, TokenUsage())
 
-    def get_total(self) -> TokenUsage:
+    def total(self) -> TokenUsage:
+        """
+        Return accumulated usage across all operations.
+        """
 
         with self._lock:
-
             prompt_tokens = sum(
                 usage.prompt_tokens
                 for usage in self._usage.values()
@@ -78,12 +75,23 @@ class TokenTracker:
                 for usage in self._usage.values()
             )
 
-            return TokenUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
+        return TokenUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
+    def snapshot(self) -> dict[str, TokenUsage]:
+        """
+        Return a copy of all accumulated usage.
+        """
+
+        with self._lock:
+            return dict(self._usage)
 
     def reset(self) -> None:
+        """
+        Clear all tracked usage.
+        """
 
         with self._lock:
             self._usage.clear()

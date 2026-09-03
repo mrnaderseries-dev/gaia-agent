@@ -23,15 +23,15 @@ SUPPORTED_IMAGE_EXTENSIONS = {
 
 class AnalyzeImageTool(Tool):
     """
-    Analyze a local image using the configured multimodal LLM.
+    Analyze a local image using a multimodal LLM.
     """
 
     name = "analyze_image"
 
     description = (
-        "Analyze an image, chart, chess board, or diagram and "
-        "answer a question using only the visual information "
-        "contained in the image."
+        "Analyze an image, chart, chess board, or diagram "
+        "and answer a question using only the visual "
+        "information contained in the image."
     )
 
     inputs = {
@@ -66,41 +66,33 @@ class AnalyzeImageTool(Tool):
             )
 
         self.llm_service = llm_service
-        self.base_dir = Path(
-            base_dir
-        ).resolve()
+        self.base_dir = Path(base_dir).resolve()
 
     def forward(
         self,
         image_path: str,
         question: str,
     ) -> str:
-
         try:
-
-            if not isinstance(
-                image_path,
-                str,
-            ) or not image_path.strip():
-
+            if (
+                not isinstance(image_path, str)
+                or not image_path.strip()
+            ):
                 return (
                     "Error: image_path must be a "
                     "non-empty string."
                 )
 
-            if not isinstance(
-                question,
-                str,
-            ) or not question.strip():
-
+            if (
+                not isinstance(question, str)
+                or not question.strip()
+            ):
                 return (
                     "Error: question must be a "
                     "non-empty string."
                 )
 
-            if is_placeholder_path(
-                image_path
-            ):
+            if is_placeholder_path(image_path):
                 return (
                     f"Error: Image path '{image_path}' "
                     "is a placeholder or invalid."
@@ -135,12 +127,12 @@ class AnalyzeImageTool(Tool):
                     f"'{extension}'. Supported formats: "
                     f"{', '.join(sorted(SUPPORTED_IMAGE_EXTENSIONS))}."
                 )
+
             prompt = (
                 "You are solving a GAIA benchmark task using "
                 "a visual input.\n\n"
                 "Analyze the provided image carefully.\n"
-                "Use ONLY information that is actually visible "
-                "in the image.\n"
+                "Use ONLY information actually visible in the image.\n"
                 "Do not invent missing information.\n"
                 "If the question requires reading text, numbers, "
                 "labels, a chart, a chess position, or a diagram, "
@@ -149,11 +141,10 @@ class AnalyzeImageTool(Tool):
                 "Return the most precise answer possible."
             )
 
-            response = (
-                self.llm_service.generate_image_sync(
-                    image_path=path,
-                    question=prompt,
-                )
+            response = self.llm_service.generate_image_sync(
+                image_path=path,
+                question=prompt,
+                operation="llm.vision",
             )
 
             answer = str(response).strip()
@@ -186,21 +177,15 @@ class VisionTools:
         llm_service: LLMService,
         base_dir: str = ".",
     ) -> None:
-
         if llm_service is None:
             raise ValueError(
                 "VisionTools requires an LLMService."
             )
 
         self.llm_service = llm_service
-        self.base_dir = Path(
-            base_dir
-        ).resolve()
+        self.base_dir = Path(base_dir).resolve()
 
-    def get_tools(
-        self,
-    ) -> list[Tool]:
-
+    def get_tools(self) -> list[Tool]:
         return [
             AnalyzeImageTool(
                 llm_service=self.llm_service,

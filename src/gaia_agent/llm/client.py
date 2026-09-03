@@ -1,4 +1,4 @@
-from future import annotations
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Any, Sequence, TypeVar
@@ -13,16 +13,6 @@ Message = dict[str, Any]
 
 
 class LLMClient(ABC):
-    """
-    Provider-independent LLM interface.
-
-    The client is responsible for communicating with the actual
-    model provider.
-
-    The service layer above this class is responsible for
-    higher-level operations such as image analysis.
-    """
-
     @abstractmethod
     async def generate(
         self,

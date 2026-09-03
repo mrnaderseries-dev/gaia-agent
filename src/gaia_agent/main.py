@@ -3,116 +3,110 @@ from __future__ import annotations
 import asyncio
 import sys
 
-# Root-cause fix for the Windows console 'charmap' UnicodeEncodeError:
-# task questions contain non-ASCII characters that the default ANSI
-# stdout codec cannot encode, which crashed the agent with
-# UnicodeEncodeError and submitted "Error" as the answer.
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(
+        encoding="utf-8",
+        errors="replace",
+    )
+
 if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(
+        encoding="utf-8",
+        errors="replace",
+    )
 
 from gaia_agent.agents.answer_sanitizer import AnswerSanitizer
 from gaia_agent.agents.verifier import VerifierAgent
-
 from gaia_agent.context.ContextBuilder import ContextBuilder
 from gaia_agent.context.ContextBudget import ContextBudget
 from gaia_agent.context.ContextCompressor import ContextCompressor
 from gaia_agent.context.ContextPolicy import ContextPolicy
 from gaia_agent.context.ContextValidator import ContextValidator
-
 from gaia_agent.context.sources.conversation import ConversationSource
 from gaia_agent.context.sources.history import HistorySource
-from gaia_agent.context.sources.memory import MemorySource
 from gaia_agent.context.sources.runtime import RuntimeSource
-
 from gaia_agent.core.agent_execution import AgentExecution
 from gaia_agent.core.agent_loop import AgentLoop
 from gaia_agent.core.agent_state import AgentState
 from gaia_agent.core.llm_executor import LLMExecutor
-
 from gaia_agent.core.orchestration.orchestrator import Orchestrator
-
 from gaia_agent.core.policies.approval import ApprovalPolicy
 from gaia_agent.core.policies.execution import ExecutionPolicy
 from gaia_agent.core.policies.termination import TerminationPolicy
-
 from gaia_agent.core.risk.analyzer import RiskAnalyzer
 from gaia_agent.core.risk.assessor import RiskAssessor
 from gaia_agent.core.risk.rules import RiskRules
-
 from gaia_agent.llm.model import LLMModel
 from gaia_agent.llm.provider.ollama import OllamaClient
-
-from gaia_agent.memory.providers.in_memory import InMemoryMemoryRepository
-
-from gaia_agent.memory.retrieval.dense_retriver import CandidateRetriever
-from gaia_agent.memory.retrieval.embedding import OllamaEmbeddingProvider
-from gaia_agent.memory.retrieval.lexical_retriever import LexicalRetriever
-from gaia_agent.memory.retrieval.retriever import MemoryRetriever
-
+from gaia_agent.llm.service import LLMService
 from gaia_agent.observability.logger import EventLogger
 from gaia_agent.observability.metrics import Metrics
 from gaia_agent.observability.token_tracker import TokenTracker
 from gaia_agent.observability.tracer import Tracer
-
 from gaia_agent.planner.planner import Planner
-
 from gaia_agent.reliability.engine import ReliabilityEngine
 from gaia_agent.reliability.error_handler import ErrorHandler
 from gaia_agent.reliability.failure_classifier import FailureClassifier
 from gaia_agent.reliability.loop_detector import LoopDetector
 from gaia_agent.reliability.recovery import Recovery
 from gaia_agent.reliability.retry import Retry
-
 from gaia_agent.reliability.policies.recovery_policy import RecoveryPolicy
 from gaia_agent.reliability.policies.retry_policy import RetryPolicy
-
 from gaia_agent.tools.registry import ToolRegistry
+
+
+OLLAMA_BASE_URL = "http://localhost:11434"
+
+TEXT_MODEL = LLMModel(
+    provider="ollama",
+    model="qwen2.5:3b",
+    max_tokens=768,
+    temperature=0.2,
+)
+
+VISION_MODEL = LLMModel(
+    provider="ollama",
+    model="gemma3",
+    max_tokens=768,
+    temperature=0.0,
+)
 
 
 async def create_agent() -> AgentLoop:
     print("Creating agent...")
-
-    # ==========================================================
-    # LLM
-    # ==========================================================
-
-    llm_client = OllamaClient(
-        base_url="http://localhost:11434",
-    )
-
-    llm_model = LLMModel(
-        provider="ollama",
-        model="qwen2.5:3b",
-        # Local 3B model: plans, verdicts and GAIA answers are short.
-        # 4096 let every call ramble for minutes (primary timeout cause).
-        max_tokens=768,
-        temperature=0.2,
-    )
-
-    # ==========================================================
-    # Observability
-    # ==========================================================
 
     event_logger = EventLogger()
     metrics = Metrics()
     tracer = Tracer()
     token_tracker = TokenTracker()
 
-    # ==========================================================
-    # Tools
-    # ==========================================================
+    llm_client = OllamaClient(
+        base_url=OLLAMA_BASE_URL,
+        token_tracker=token_tracker,
+    )
+
+    text_llm_service = LLMService(
+        client=llm_client,
+        model=TEXT_MODEL,
+    )
+
+    vision_llm_service = LLMService(
+        client=llm_client,
+        model=VISION_MODEL,
+    )
 
     tool_registry = ToolRegistry(
         base_dir=".",
-        model=llm_model,
+        llm_service=text_llm_service,
+        vision_llm_service=vision_llm_service,
         stt_backend=None,
+        stt_model_size="base",
+        stt_device="cpu",
+        stt_compute_type="int8",
     )
 
     tool_specs = tool_registry.get_tool_specs()
-
-    # Planner requires name -> contract dict (Phase 1).
+    
     available_tools = {
         spec.name: spec
         for spec in tool_specs
@@ -120,20 +114,15 @@ async def create_agent() -> AgentLoop:
 
     print("\nAvailable tools:")
 
-    for tool in tool_specs:
-        print(f"  - {tool.name}")
-
-    # ==========================================================
-    # Policies
-    # ==========================================================
+    for spec in tool_specs:
+        print(f"  - {spec.name}")
 
     execution_policy = ExecutionPolicy()
-
     risk_rules = RiskRules()
 
     risk_analyzer = RiskAnalyzer(
         client=llm_client,
-        model=llm_model,
+        model=TEXT_MODEL,
     )
 
     risk_assessor = RiskAssessor(
@@ -146,10 +135,6 @@ async def create_agent() -> AgentLoop:
     termination_policy = TerminationPolicy(
         max_iterations=20,
     )
-
-    # ==========================================================
-    # Context
-    # ==========================================================
 
     context_policy = ContextPolicy(
         include_memory=False,
@@ -168,7 +153,7 @@ async def create_agent() -> AgentLoop:
 
     context_compressor = ContextCompressor(
         client=llm_client,
-        model=llm_model,
+        model=TEXT_MODEL,
         budget=context_budget,
         policy=context_policy,
     )
@@ -177,34 +162,6 @@ async def create_agent() -> AgentLoop:
     history_source = HistorySource()
     runtime_source = RuntimeSource()
 
-    # ==========================================================
-    # Memory
-    # ==========================================================
-
-    memory_repository = InMemoryMemoryRepository()
-
-    embedding_provider = OllamaEmbeddingProvider()
-
-    candidate_retriever = CandidateRetriever(
-        embedding_provider=embedding_provider,
-    )
-
-    lexical_retriever = LexicalRetriever()
-
-    memory_retriever = MemoryRetriever(
-        candidate_retriever=candidate_retriever,
-        lexical_retriever=lexical_retriever,
-    )
-
-    memory_source = MemorySource(
-        retriever=memory_retriever,
-        repository=memory_repository,
-    )
-
-    # ==========================================================
-    # Context Builder
-    # ==========================================================
-
     context_builder = ContextBuilder(
         policy=context_policy,
         budget=context_budget,
@@ -212,13 +169,9 @@ async def create_agent() -> AgentLoop:
         compressor=context_compressor,
         conversation_source=conversation_source,
         history_source=history_source,
-        memory_source=memory_source,
+        memory_source=None,
         runtime_source=runtime_source,
     )
-
-    # ==========================================================
-    # Loop Detector (created before Planner, which requires it)
-    # ==========================================================
 
     loop_detector = LoopDetector(
         max_history=50,
@@ -227,23 +180,14 @@ async def create_agent() -> AgentLoop:
         sequence_repetition_threshold=3,
     )
 
-    # ==========================================================
-    # Planner
-    # ==========================================================
-
     planner = Planner(
         client=llm_client,
-        model=llm_model,
+        model=TEXT_MODEL,
         available_tools=available_tools,
         loop_detector=loop_detector,
     )
 
-    # ==========================================================
-    # Reliability
-    # ==========================================================
-
     error_handler = ErrorHandler()
-
     failure_classifier = FailureClassifier()
 
     retry_policy = RetryPolicy(
@@ -268,19 +212,11 @@ async def create_agent() -> AgentLoop:
         recovery=recovery,
     )
 
-    # ==========================================================
-    # LLM Executor
-    # ==========================================================
-
     llm_executor = LLMExecutor(
         client=llm_client,
-        model=llm_model,
+        model=TEXT_MODEL,
         context_builder=context_builder,
     )
-
-    # ==========================================================
-    # Agent Execution
-    # ==========================================================
 
     agent_execution = AgentExecution(
         tool_registry=tool_registry,
@@ -294,20 +230,12 @@ async def create_agent() -> AgentLoop:
         token_tracker=token_tracker,
     )
 
-    # ==========================================================
-    # Verifier
-    # ==========================================================
-
     verifier = VerifierAgent(
         client=llm_client,
-        model=llm_model,
+        model=TEXT_MODEL,
     )
 
     answer_sanitizer = AnswerSanitizer()
-
-    # ==========================================================
-    # Orchestrator
-    # ==========================================================
 
     orchestrator = Orchestrator(
         context_builder=context_builder,
@@ -322,10 +250,6 @@ async def create_agent() -> AgentLoop:
         metrics=metrics,
         tracer=tracer,
     )
-
-    # ==========================================================
-    # Agent Loop
-    # ==========================================================
 
     agent = AgentLoop(
         orchestrator=orchestrator,
@@ -345,16 +269,17 @@ async def main() -> None:
 
         state = AgentState(
             user_id=1,
-            user_request="Search the web and tell me the current population of France.",
+            user_request=(
+                "Search the web and tell me the current "
+                "population of France."
+            ),
         )
 
         print("State created.")
         print(f"User request: {state.user_request}")
         print("Starting agent.run()...")
 
-        result = await agent.run(
-            state,
-        )
+        result = await agent.run(state)
 
         print("agent.run() returned.")
 
@@ -396,7 +321,6 @@ async def main() -> None:
         print("==============================")
         print(type(exc).__name__)
         print(str(exc))
-
         raise
 
 

@@ -25,41 +25,28 @@ DELIMITED_EXTENSIONS = {
 
 
 class AnalyzeExcelTool(Tool):
-    """
-    Analyze spreadsheet data using a text LLM.
-
-    Supported formats:
-
-    - XLSX
-    - XLSM
-    - CSV
-    - TSV
-
-    Legacy XLS is deliberately not accepted because openpyxl does
-    not provide a correct backend for that format.
-    """
 
     name = "analyze_excel"
 
     description = (
         "Analyze an Excel workbook or tabular spreadsheet "
-        "according to a user's question. Supports XLSX, XLSM, "
-        "CSV and TSV files."
+        "according to a user's question. Supports XLSX, "
+        "XLSM, CSV and TSV files."
     )
 
     inputs = {
         "file_path": {
             "type": "string",
             "description": (
-                "Path to the spreadsheet relative to the allowed "
-                "base directory or filename."
+                "Path to the spreadsheet relative to the "
+                "allowed base directory or filename."
             ),
         },
         "question": {
             "type": "string",
             "description": (
-                "Question that should be answered using the "
-                "spreadsheet data."
+                "Question that should be answered using "
+                "the spreadsheet data."
             ),
         },
     }
@@ -75,7 +62,6 @@ class AnalyzeExcelTool(Tool):
         llm_service: LLMService,
         base_dir: str = ".",
     ) -> None:
-
         super().__init__()
 
         if llm_service is None:
@@ -84,15 +70,12 @@ class AnalyzeExcelTool(Tool):
             )
 
         self.llm_service = llm_service
-        self.base_dir = Path(
-            base_dir
-        ).resolve()
+        self.base_dir = Path(base_dir).resolve()
 
     def _read_excel(
         self,
         path: Path,
     ) -> str:
-
         workbook = load_workbook(
             filename=path,
             data_only=True,
@@ -103,7 +86,6 @@ class AnalyzeExcelTool(Tool):
             output: list[str] = []
 
             for sheet in workbook.worksheets:
-
                 output.append(
                     f"Sheet: {sheet.title}"
                 )
@@ -113,7 +95,6 @@ class AnalyzeExcelTool(Tool):
                 for row in sheet.iter_rows(
                     values_only=True
                 ):
-
                     if row_count >= self.MAX_ROWS:
                         output.append(
                             "... [spreadsheet truncated "
@@ -125,9 +106,7 @@ class AnalyzeExcelTool(Tool):
                         ""
                         if value is None
                         else str(value)
-                        for value in row[
-                            : self.MAX_COLUMNS
-                        ]
+                        for value in row[: self.MAX_COLUMNS]
                     ]
 
                     if not any(
@@ -150,11 +129,11 @@ class AnalyzeExcelTool(Tool):
 
         finally:
             workbook.close()
+
     def _read_delimited(
         self,
         path: Path,
     ) -> str:
-
         delimiter = (
             "\t"
             if path.suffix.lower() == ".tsv"
@@ -177,7 +156,6 @@ class AnalyzeExcelTool(Tool):
                     encoding=encoding,
                     newline="",
                 ) as handle:
-
                     reader = csv.reader(
                         handle,
                         delimiter=delimiter,
@@ -187,7 +165,6 @@ class AnalyzeExcelTool(Tool):
                     row_count = 0
 
                     for row in reader:
-
                         if row_count >= self.MAX_ROWS:
                             output.append(
                                 "... [table truncated because "
@@ -197,9 +174,7 @@ class AnalyzeExcelTool(Tool):
 
                         values = [
                             str(value)
-                            for value in row[
-                                : self.MAX_COLUMNS
-                            ]
+                            for value in row[: self.MAX_COLUMNS]
                         ]
 
                         if not any(
@@ -229,7 +204,6 @@ class AnalyzeExcelTool(Tool):
         self,
         path: Path,
     ) -> str:
-
         extension = path.suffix.lower()
 
         if extension in EXCEL_EXTENSIONS:
@@ -252,7 +226,6 @@ class AnalyzeExcelTool(Tool):
         self,
         text: str,
     ) -> str:
-
         if len(text) <= self.MAX_CHARS:
             return text
 
@@ -268,31 +241,26 @@ class AnalyzeExcelTool(Tool):
         file_path: str,
         question: str,
     ) -> str:
-
         try:
-            if not isinstance(
-                file_path,
-                str,
-            ) or not file_path.strip():
-
+            if (
+                not isinstance(file_path, str)
+                or not file_path.strip()
+            ):
                 return (
                     "Error: file_path must be a "
                     "non-empty string."
                 )
 
-            if not isinstance(
-                question,
-                str,
-            ) or not question.strip():
-
+            if (
+                not isinstance(question, str)
+                or not question.strip()
+            ):
                 return (
                     "Error: question must be a "
                     "non-empty string."
                 )
 
-            if is_placeholder_path(
-                file_path
-            ):
+            if is_placeholder_path(file_path):
                 return (
                     f"Error: File path '{file_path}' "
                     "is a placeholder or invalid."
@@ -320,9 +288,7 @@ class AnalyzeExcelTool(Tool):
                     f"Error: '{file_path}' is not a file."
                 )
 
-            spreadsheet_data = (
-                self._read_spreadsheet(path)
-            )
+            spreadsheet_data = self._read_spreadsheet(path)
 
             if not spreadsheet_data.strip():
                 return (
@@ -344,15 +310,14 @@ class AnalyzeExcelTool(Tool):
                 f"Spreadsheet:\n{spreadsheet_data}"
             )
 
-            response = (
-                self.llm_service.generate_sync(
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        }
-                    ]
-                )
+            response = self.llm_service.generate_sync(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+                operation="llm.excel",
             )
 
             answer = str(response).strip()
@@ -373,30 +338,21 @@ class AnalyzeExcelTool(Tool):
 
 
 class ExcelTools:
-    """
-    Container for spreadsheet analysis tools.
-    """
 
     def __init__(
         self,
         llm_service: LLMService,
         base_dir: str = ".",
     ) -> None:
-
         if llm_service is None:
             raise ValueError(
                 "ExcelTools requires an LLMService."
             )
 
         self.llm_service = llm_service
-        self.base_dir = Path(
-            base_dir
-        ).resolve()
+        self.base_dir = Path(base_dir).resolve()
 
-    def get_tools(
-        self,
-    ) -> list[Tool]:
-
+    def get_tools(self) -> list[Tool]:
         return [
             AnalyzeExcelTool(
                 llm_service=self.llm_service,

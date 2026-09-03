@@ -18,37 +18,53 @@ TOOL_CAPABILITIES: dict[str, ToolCapability] = {
     "web_search": ToolCapability.NETWORK_READ,
     "visit_webpage": ToolCapability.NETWORK_READ,
     "youtube_transcript": ToolCapability.NETWORK_READ,
+
     "python_interpreter": ToolCapability.COMPUTATION,
+
     "file_reader": ToolCapability.READ_ONLY,
     "analyze_image": ToolCapability.READ_ONLY,
     "analyze_excel": ToolCapability.READ_ONLY,
+    "transcribe_audio": ToolCapability.READ_ONLY,
 }
 
 
 class ToolSpec(BaseModel):
-    """
-    Canonical contract describing a tool.
 
-    The registry owns creation of ToolSpec instances.
-    Planner and execution validation consume the same contract.
-    """
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True
+    )
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    name: str = Field(
+        ...,
+        description="Unique registered tool name",
+    )
 
-    name: str = Field(..., description="Unique registered tool name")
-    description: str = Field(..., description="What the tool does")
+    description: str = Field(
+        ...,
+        description="What the tool does",
+    )
+
     arguments_schema: dict[str, Any] = Field(
         default_factory=dict,
         description="Exact arguments accepted by the tool",
     )
+
     capability: ToolCapability = Field(
         ...,
         description="Security/side-effect capability",
     )
+
     result_schema: dict[str, Any] = Field(
         default_factory=dict,
         description="Shape/type of the tool result",
     )
-    error_codes: list[str] = Field(default_factory=list)
-    allowed_imports: list[str] = Field(default_factory=list)
+
+    error_codes: list[str] = Field(
+        default_factory=list
+    )
+
+    allowed_imports: list[str] = Field(
+        default_factory=list
+    )
+
     function: Callable[..., Any] | None = None
