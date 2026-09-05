@@ -106,7 +106,7 @@ async def create_agent() -> AgentLoop:
     )
 
     tool_specs = tool_registry.get_tool_specs()
-    
+
     available_tools = {
         spec.name: spec
         for spec in tool_specs
