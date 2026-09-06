@@ -67,7 +67,7 @@ class AgentLoop:
                 elif hasattr(self.orchestrator, "plan"):
                     pass
             await self.orchestrator.run_iteration()
-            state.iteraion += 1
+            state.iteration += 1
             print("\n--- ITERATION ---")
             print("iteration:", state.iteration)
             print("plan:", state.plan)
