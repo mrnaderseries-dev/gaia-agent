@@ -4,219 +4,313 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from gaia_agent.reliability.errors import (
+    AgentError,
+    ErrorCategory,
+    ErrorSeverity,
+)
+
 
 class AgentPhase(str, Enum):
     """
-    Lifecycle phase of the agent.
+    High-level lifecycle phases of the agent.
     """
 
-    CREATED = "created"
+    IDLE = "idle"
     PLANNING = "planning"
     EXECUTING = "executing"
-    EVIDENCE_AVAILABLE = "evidence_available"
-    ANSWER_GENERATED = "answer_generated"
     VERIFYING = "verifying"
     COMPLETED = "completed"
-
     FAILED = "failed"
-    RECOVERING = "recovering"
+    TERMINATED = "terminated"
 
 
 class TransitionReason(str, Enum):
     """
-    Why the agent is moving from one phase to another.
+    Why the agent requested a state transition.
     """
 
-    INITIAL_PLAN = "initial_plan"
-
-    RETRY = "retry"
+    START = "start"
+    PLAN_READY = "plan_ready"
+    EXECUTION_READY = "execution_ready"
+    EXECUTION_COMPLETED = "execution_completed"
+    VERIFICATION_PASSED = "verification_passed"
+    VERIFICATION_FAILED = "verification_failed"
+    EXECUTION_FAILED = "execution_failed"
     RECOVERY = "recovery"
-
-    EVIDENCE = "evidence"
-    ANSWER = "answer"
-    VERIFICATION = "verification"
-
-    FAILURE = "failure"
-    COMPLETION = "completion"
+    RETRY = "retry"
+    USER_ABORT = "user_abort"
+    TERMINATION = "termination"
 
 
-class TerminationReason(str, Enum):
-    """
-    Why the agent execution ended.
-    """
+@dataclass(frozen=True, slots=True)
+class StateTransition:
+  
 
-    VERIFIED = "verified"
-    USER_ABORTED = "user_aborted"
-    UNSUPPORTED = "unsupported"
-    RECOVERY_EXHAUSTED = "recovery_exhausted"
-    FATAL_ERROR = "fatal_error"
-    TIMEOUT = "timeout"
+    from_phase: AgentPhase
+    to_phase: AgentPhase
+    reason: TransitionReason
 
 
-class InvalidStateTransition(Exception):
-    """
-    Raised when an illegal AgentPhase transition is attempted.
-    """
-
-    def __init__(
-        self,
-        current: AgentPhase,
-        target: AgentPhase,
-        reason: TransitionReason | None = None,
-    ) -> None:
-        message = (
-            f"Invalid agent state transition: "
-            f"{current.value} -> {target.value}"
-        )
-
-        if reason is not None:
-            message += f" (reason={reason.value})"
-
-        super().__init__(message)
-
-        self.current = current
-        self.target = target
-        self.reason = reason
-
-
-# ---------------------------------------------------------------------------
-# Legal state transitions
-# ---------------------------------------------------------------------------
-
-_ALLOWED_TRANSITIONS: dict[AgentPhase, dict[AgentPhase, set[TransitionReason]]] = {
-    AgentPhase.CREATED: {
-        AgentPhase.PLANNING: {
-            TransitionReason.INITIAL_PLAN,
-        },
-    },
-
-    AgentPhase.PLANNING: {
-        AgentPhase.EXECUTING: {
-            TransitionReason.INITIAL_PLAN,
-            TransitionReason.RECOVERY,
-        },
-        AgentPhase.FAILED: {
-            TransitionReason.FAILURE,
-        },
-    },
-
-    AgentPhase.EXECUTING: {
-        AgentPhase.EVIDENCE_AVAILABLE: {
-            TransitionReason.EVIDENCE,
-        },
-
-        AgentPhase.FAILED: {
-            TransitionReason.FAILURE,
-        },
-    },
-
-    AgentPhase.EVIDENCE_AVAILABLE: {
-        AgentPhase.ANSWER_GENERATED: {
-            TransitionReason.ANSWER,
-        },
-
-        AgentPhase.FAILED: {
-            TransitionReason.FAILURE,
-        },
-    },
-
-    AgentPhase.ANSWER_GENERATED: {
-        AgentPhase.VERIFYING: {
-            TransitionReason.VERIFICATION,
-        },
-
-        AgentPhase.FAILED: {
-            TransitionReason.FAILURE,
-        },
-    },
-
-    AgentPhase.VERIFYING: {
-        AgentPhase.COMPLETED: {
-            TransitionReason.COMPLETION,
-        },
-
-        AgentPhase.FAILED: {
-            TransitionReason.FAILURE,
-        },
-
-        AgentPhase.RECOVERING: {
-            TransitionReason.RECOVERY,
-        },
-    },
-
-    # -----------------------------------------------------------------------
-    # Failure / retry / recovery
-    # -----------------------------------------------------------------------
-
-    AgentPhase.FAILED: {
-        AgentPhase.EXECUTING: {
-            TransitionReason.RETRY,
-        },
-
-        AgentPhase.RECOVERING: {
-            TransitionReason.RECOVERY,
-        },
-    },
-
-    AgentPhase.RECOVERING: {
-        AgentPhase.EXECUTING: {
-            TransitionReason.RECOVERY,
-        },
-        AgentPhase.FAILED: {
-            TransitionReason.FAILURE,
-        },
-    },
-
-    # COMPLETED intentionally has no outgoing transitions.
-    AgentPhase.COMPLETED: {},
-}
-
-
-@dataclass(slots=True)
+@dataclass
 class AgentState:
     """
     Canonical runtime state of the agent.
 
-    This object stores state.
+    AgentState owns:
+        - current lifecycle phase
+        - transition validation
+        - transition history
+        - runtime metadata
 
-    It does NOT decide:
-      - whether to retry
-      - whether to recover
-      - whether to replan
-      - whether a failure is transient
-      - whether a tool should be selected
-
-    Those decisions belong to policies / orchestration layers.
+    AgentState does NOT own:
+        - retry decisions
+        - recovery decisions
+        - failure classification
+        - tool execution
+        - planning
+        - orchestration
     """
 
-    task_id: str
-    user_request: str
-    phase: AgentPhase = AgentPhase.CREATED
-    transition_history: list[AgentPhase] = field(default_factory=list)
-    current_plan: Any | None = None
-    current_step: Any | None = None
-    executed_steps: list[Any] = field(default_factory=list)
-    artifacts: list[Any] = field(default_factory=list)
-    last_tool_result: Any | None = None
-    last_failure: Any | None = None
-    answer: str | None = None
-    verification: Any | None = None
-    termination_reason: TerminationReason | None = None
+    phase: AgentPhase = AgentPhase.IDLE
 
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    transition_history: list[StateTransition] = field(
+        default_factory=list
+    )
+
+    _ALLOWED_TRANSITIONS: dict[
+        AgentPhase,
+        frozenset[AgentPhase],
+    ] = field(
+        default_factory=lambda: {
+            AgentPhase.IDLE: frozenset(
+                {
+                    AgentPhase.PLANNING,
+                    AgentPhase.TERMINATED,
+                }
+            ),
+
+            AgentPhase.PLANNING: frozenset(
+                {
+                    AgentPhase.EXECUTING,
+                    AgentPhase.FAILED,
+                    AgentPhase.TERMINATED,
+                }
+            ),
+
+            AgentPhase.EXECUTING: frozenset(
+                {
+                    AgentPhase.VERIFYING,
+                    AgentPhase.FAILED,
+                    AgentPhase.TERMINATED,
+                }
+            ),
+
+            AgentPhase.VERIFYING: frozenset(
+                {
+                    AgentPhase.COMPLETED,
+                    AgentPhase.PLANNING,
+                    AgentPhase.FAILED,
+                    AgentPhase.TERMINATED,
+                }
+            ),
+
+            AgentPhase.COMPLETED: frozenset(
+                {
+                    AgentPhase.TERMINATED,
+                }
+            ),
+
+            AgentPhase.FAILED: frozenset(
+                {
+                    AgentPhase.PLANNING,
+                    AgentPhase.TERMINATED,
+                }
+            ),
+
+            AgentPhase.TERMINATED: frozenset(),
+        },
+        init=False,
+        repr=False,
+    )
 
     def transition(
         self,
         new_phase: AgentPhase,
         *,
-        reason: TransitionReason | None = None,
-    ) -> None:
-        """
-        Transition the agent to a new phase if allowed by the transition rules.
-        """
-        allowed_reasons = _ALLOWED_TRANSITIONS.get(self.phase, {}).get(new_phase)
+        reason: TransitionReason,
+    ) -> StateTransition:
 
-        if allowed_reasons is None or (reason is not None and reason not in allowed_reasons):
-            raise InvalidStateTransition(self.phase, new_phase, reason)
+        if not isinstance(new_phase, AgentPhase):
+            raise AgentError(
+                error_type="InvalidPhase",
+                message=(
+                    f"Invalid phase type: "
+                    f"{type(new_phase).__name__}"
+                ),
+                category=ErrorCategory.VALIDATION,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="AgentState",
+                operation="transition",
+                details={
+                    "current_phase": self.phase.value,
+                    "target_phase": repr(new_phase),
+                },
+            )
 
-        self.transition_history.append(self.phase)
+        if not isinstance(reason, TransitionReason):
+            raise AgentError(
+                error_type="InvalidTransitionReason",
+                message=(
+                    f"Invalid transition reason: "
+                    f"{reason!r}"
+                ),
+                category=ErrorCategory.VALIDATION,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="AgentState",
+                operation="transition",
+                details={
+                    "current_phase": self.phase.value,
+                    "target_phase": new_phase.value,
+                    "reason": repr(reason),
+                },
+            )
+
+        current_phase = self.phase
+
+        allowed_targets = self._ALLOWED_TRANSITIONS.get(
+            current_phase,
+            frozenset(),
+        )
+
+        if new_phase not in allowed_targets:
+            raise AgentError(
+                error_type="InvalidStateTransition",
+                message=(
+                    f"Invalid state transition: "
+                    f"{current_phase.value} -> "
+                    f"{new_phase.value}"
+                ),
+                category=ErrorCategory.STATE_TRANSITION_ERROR,
+                severity=ErrorSeverity.CRITICAL,
+                retryable=False,
+                recoverable=False,
+                source="AgentState",
+                operation="transition",
+                details={
+                    "current_phase": current_phase.value,
+                    "target_phase": new_phase.value,
+                    "reason": reason.value,
+                    "allowed_transitions": [
+                        phase.value
+                        for phase in allowed_targets
+                    ],
+                },
+            )
+
+        transition = StateTransition(
+            from_phase=current_phase,
+            to_phase=new_phase,
+            reason=reason,
+        )
+
         self.phase = new_phase
+        self.transition_history.append(transition)
+
+        return transition
+    def start(self) -> StateTransition:
+        return self.transition(
+            AgentPhase.PLANNING,
+            reason=TransitionReason.START,
+        )
+
+    def begin_execution(self) -> StateTransition:
+        return self.transition(
+            AgentPhase.EXECUTING,
+            reason=TransitionReason.EXECUTION_READY,
+        )
+
+    def begin_verification(self) -> StateTransition:
+        return self.transition(
+            AgentPhase.VERIFYING,
+            reason=TransitionReason.EXECUTION_COMPLETED,
+        )
+
+    def complete(self) -> StateTransition:
+        return self.transition(
+            AgentPhase.COMPLETED,
+            reason=TransitionReason.VERIFICATION_PASSED,
+        )
+
+    def fail(
+        self,
+        *,
+        reason: TransitionReason = TransitionReason.EXECUTION_FAILED,
+    ) -> StateTransition:
+        return self.transition(
+            AgentPhase.FAILED,
+            reason=reason,
+        )
+
+    def recover(self) -> StateTransition:
+        return self.transition(
+            AgentPhase.PLANNING,
+            reason=TransitionReason.RECOVERY,
+        )
+
+    def retry(self) -> StateTransition:
+        return self.transition(
+            AgentPhase.PLANNING,
+            reason=TransitionReason.RETRY,
+        )
+
+    def terminate(self) -> StateTransition:
+        return self.transition(
+            AgentPhase.TERMINATED,
+            reason=TransitionReason.TERMINATION,
+        )
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.phase in {
+            AgentPhase.COMPLETED,
+            AgentPhase.TERMINATED,
+        }
+
+    @property
+    def is_failed(self) -> bool:
+        return self.phase is AgentPhase.FAILED
+
+    @property
+    def is_active(self) -> bool:
+        return self.phase in {
+            AgentPhase.PLANNING,
+            AgentPhase.EXECUTING,
+            AgentPhase.VERIFYING,
+        }
+
+    def can_transition_to(
+        self,
+        new_phase: AgentPhase,
+    ) -> bool:
+        if not isinstance(new_phase, AgentPhase):
+            return False
+
+        return new_phase in self._ALLOWED_TRANSITIONS.get(
+            self.phase,
+            frozenset(),
+        )
+
+    def last_transition(
+        self,
+    ) -> StateTransition | None:
+        if not self.transition_history:
+            return None
+
+        return self.transition_history[-1]
