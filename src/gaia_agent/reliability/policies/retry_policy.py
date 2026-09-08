@@ -16,20 +16,15 @@ class RetryPolicy:
     def __init__(
         self,
         *,
-        max_attempts: int = 3,
         base_delay: float = 0.5,
         max_delay: float = 8.0,
     ) -> None:
-        if max_attempts < 1:
-            raise ValueError("max_attempts must be >= 1.")
-
         if base_delay < 0:
             raise ValueError("base_delay must be >= 0.")
 
         if max_delay < base_delay:
             raise ValueError("max_delay must be >= base_delay.")
 
-        self.max_attempts = max_attempts
         self.base_delay = base_delay
         self.max_delay = max_delay
 
@@ -43,12 +38,6 @@ class RetryPolicy:
             return RetryDecision(
                 should_retry=False,
                 reason="Invalid attempt number.",
-            )
-
-        if current_attempt >= self.max_attempts:
-            return RetryDecision(
-                should_retry=False,
-                reason="Retry budget exhausted.",
             )
 
         if failure_class != FailureClass.TRANSIENT:
@@ -65,5 +54,5 @@ class RetryPolicy:
         return RetryDecision(
             should_retry=True,
             delay=delay,
-            reason="Transient failure within retry budget.",
+            reason="Transient failure.",
         )
