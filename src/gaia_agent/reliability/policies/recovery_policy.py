@@ -3,13 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from gaia_agent.reliability.failure_classifier import (
-    FailureClassification,
-    FailureType,
-)
+from gaia_agent.reliability.failure_classifier import FailureClass
 
 
 class RecoveryAction(str, Enum):
+    NONE = "none"
     REPLAN = "replan"
     STOP = "stop"
 
@@ -17,61 +15,52 @@ class RecoveryAction(str, Enum):
 @dataclass(frozen=True, slots=True)
 class RecoveryDecision:
     action: RecoveryAction
-    reason: str
+    reason: str = ""
 
 
 class RecoveryPolicy:
     def __init__(
         self,
         *,
-        allow_replan: bool = True,
+        allow_replanning: bool = True,
     ) -> None:
-        self.allow_replan = allow_replan
+        self.allow_replanning = allow_replanning
 
     def evaluate(
         self,
-        classification: FailureClassification,
+        failure_class: FailureClass,
     ) -> RecoveryDecision:
-
-        if classification.failure_type is FailureType.FATAL:
-            return RecoveryDecision(
-                action=RecoveryAction.STOP,
-                reason="Fatal failure requires execution to stop.",
-            )
-
-        if classification.failure_type is FailureType.PERMANENT:
-            return RecoveryDecision(
-                action=RecoveryAction.STOP,
-                reason=(
-                    "Permanent failure cannot be "
-                    "recovered automatically."
-                ),
-            )
-
-        if classification.failure_type is FailureType.TRANSIENT:
-            return RecoveryDecision(
-                action=RecoveryAction.STOP,
-                reason=(
-                    "Transient failure should be handled "
-                    "by RetryPolicy."
-                ),
-            )
-
-        if classification.failure_type is FailureType.RECOVERABLE:
-            if not self.allow_replan:
+        if failure_class == FailureClass.RECOVERABLE:
+            if self.allow_replanning:
                 return RecoveryDecision(
-                    action=RecoveryAction.STOP,
-                    reason="Replanning is disabled.",
+                    action=RecoveryAction.REPLAN,
+                    reason="Failure is recoverable through replanning.",
                 )
 
             return RecoveryDecision(
-                action=RecoveryAction.REPLAN,
-                reason=(
-                    "Failure may be recovered through replanning."
-                ),
+                action=RecoveryAction.STOP,
+                reason="Replanning is disabled.",
+            )
+
+        if failure_class == FailureClass.TRANSIENT:
+            return RecoveryDecision(
+                action=RecoveryAction.NONE,
+                reason="Transient failures are handled by RetryPolicy.",
+            )
+
+        if failure_class == FailureClass.PERMANENT:
+            return RecoveryDecision(
+                action=RecoveryAction.STOP,
+                reason="Permanent failure cannot be recovered automatically.",
+            )
+
+        if failure_class == FailureClass.FATAL:
+            return RecoveryDecision(
+                action=RecoveryAction.STOP,
+                reason="Fatal failure requires termination.",
             )
 
         return RecoveryDecision(
             action=RecoveryAction.STOP,
-            reason="Unknown failure cannot be recovered safely.",
+            reason="Failure classification is unknown.",
         )
