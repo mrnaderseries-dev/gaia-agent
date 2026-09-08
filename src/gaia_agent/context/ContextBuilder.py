@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
-
-from gaia_agent.core.agent_state import AgentState
-
 from .ContextBudget import ContextBudget
 from .ContextCompressor import ContextCompressor
 from .ContextPolicy import ContextPolicy
 from .ContextValidator import ContextValidator
+from .models import ContextRequest, FinalContext
 
 from .sources.conversation import ConversationSource
 from .sources.history import HistorySource
@@ -16,15 +12,7 @@ from .sources.memory import MemorySource
 from .sources.runtime import RuntimeSource
 
 
-@dataclass(slots=True)
-class FinalContext:
-
-    items: list[Any]
-    token_count: int
-
-
 class ContextBuilder:
-
     def __init__(
         self,
         policy: ContextPolicy,
@@ -48,54 +36,64 @@ class ContextBuilder:
 
     async def build(
         self,
-        state: AgentState,
+        request: ContextRequest,
     ) -> FinalContext:
 
-        context: list[Any] = []
+        context: list[object] = []
 
-        if (
-            self.policy.include_conversation
-            and self.conversation_source.is_available(state)
-        ):
-            context.extend(
-                await self.conversation_source.get(state)
-            )
+        
+        if self.policy.include_conversation:
+            if self.conversation_source.is_available(
+                request
+            ):
+                context.extend(
+                    await self.conversation_source.get(
+                        request
+                    )
+                )
+        if self.policy.include_history:
+            if self.history_source.is_available(
+                request
+            ):
+                context.extend(
+                    await self.history_source.get(
+                        request
+                    )
+                )
+        if self.policy.include_memory:
+            if self.memory_source.is_available(
+                request
+            ):
+                context.extend(
+                    await self.memory_source.get(
+                        request
+                    )
+                )
 
-        if (
-            self.policy.include_history
-            and self.history_source.is_available(state)
-        ):
-            context.extend(
-                await self.history_source.get(state)
-            )
-
-        if (
-            self.policy.include_memory
-            and self.memory_source.is_available(state)
-        ):
-            context.extend(
-                await self.memory_source.get(state)
-            )
-
-        if (
-            self.policy.include_runtime
-            and self.runtime_source.is_available(state)
-        ):
-            context.extend(
-                await self.runtime_source.get(state)
-            )
-
-        context = await self.compressor.compress(context)
-
-        validation = self.validator.validate(context)
+        if self.policy.include_runtime:
+            if self.runtime_source.is_available(
+                request
+            ):
+                context.extend(
+                    await self.runtime_source.get(
+                        request
+                    )
+                )
+        context = await self.compressor.compress(
+            context
+        )
+        validation = self.validator.validate(
+            context
+        )
 
         if not validation.valid:
             raise ValueError(
                 f"Invalid context: {validation.errors}"
             )
 
-        token_count = self.budget.count_tokens(context)
-
+        token_count = self.budget.count_tokens(
+            context
+        )
         return FinalContext(
             items=context,
             token_count=token_count,

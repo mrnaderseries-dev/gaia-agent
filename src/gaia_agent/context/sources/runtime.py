@@ -1,42 +1,40 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
-from gaia_agent.core.agent_state import AgentState
-
 from .base import ContextSource
-
-
-@dataclass(slots=True)
-class RuntimeContext:
-    iteration: int
-    tool_name: str | None
-    blocked: bool
-    tool_result: Any | None
-    tool_error: str | None
+from ..models import (
+    ContextRequest,
+    RuntimeContext,
+)
 
 
 class RuntimeSource(ContextSource):
 
     async def get(
         self,
-        state: AgentState,
-    ) -> list[Any]:
+        request: ContextRequest,
+    ) -> list[RuntimeContext]:
 
         return [
             RuntimeContext(
-                iteration=state.iteration,
-                tool_name=state.tool_name,
-                blocked=state.blocked,
-                tool_result=state.tool_result,
-                tool_error=state.tool_error,
+                iteration=request.iteration,
+                tool_name=request.tool_name,
+                blocked=request.blocked,
+                tool_result=request.tool_result,
+                tool_error=request.tool_error,
             )
         ]
 
     def is_available(
         self,
-        state: AgentState,
+        request: ContextRequest,
     ) -> bool:
 
-        return state is not None
+        return (
+            request.iteration > 0
+            or request.tool_name is not None
+            or request.blocked
+            or request.tool_result is not None
+            or request.tool_error is not None
+        )
