@@ -164,7 +164,7 @@ class TaskClassifier:
         has_reader = "file_reader" in available
         has_image = "analyze_image" in available
 
-        # 1) Arithmetic
+       
         if (
             detect_factorial_ratio(question) is not None
             or detect_simple_operation(question) is not None
@@ -185,15 +185,6 @@ class TaskClassifier:
                 ),
             )
 
-        # 2) Text transformation
-        #
-        # ROOT-CAUSE FIX: GAIA presents some tasks ENTIRELY REVERSED
-        # (".rewsna eht sa "tfel" drow eht fo etisoppo eht etirw ...").
-        # The transformation keywords ("opposite of", "write the word",
-        # ...) are then invisible to the normal keyword scan, the task
-        # was misclassified as factual and the planner fired a useless
-        # web_search. Also test the REVERSED text so a reversal task is
-        # recognized as self-contained text transformation.
         if (
             any(
                 keyword in text
@@ -219,8 +210,6 @@ class TaskClassifier:
                     "reasoning. Web search is useless here."
                 ),
             )
-
-        # 3) Local file / spreadsheet / table data
         if any(keyword in text for keyword in _FILE_KEYWORDS):
             if files:
                 excel_hit = any(
@@ -274,7 +263,7 @@ def _classify_media_and_web(
     has_visit: bool,
     has_image: bool,
 ) -> TaskAnalysis:
-    # 4) Image
+    
     if any(keyword in text for keyword in _IMAGE_KEYWORDS):
         return TaskAnalysis(
             intent=TaskIntent.IMAGE,
@@ -291,7 +280,7 @@ def _classify_media_and_web(
             ),
         )
 
-    # 5) Audio / video
+   
     if any(keyword in text for keyword in _AUDIO_VIDEO_KEYWORDS):
         return TaskAnalysis(
             intent=TaskIntent.AUDIO_VIDEO,
@@ -306,7 +295,7 @@ def _classify_media_and_web(
             ),
         )
 
-    # 6) URL navigation
+    
     url_match = re.search(
         r"https?://[^\s<>]+",
         question or "",
@@ -344,7 +333,6 @@ def _classify_media_and_web(
                 ),
             )
 
-    # 7) Wikipedia / encyclopedic facts
     if any(
         keyword in text
         for keyword in (
@@ -366,7 +354,6 @@ def _classify_media_and_web(
             ),
         )
 
-    # 8) Factual / knowledge
     if _looks_factual(text):
         return TaskAnalysis(
             intent=TaskIntent.FACTUAL_SEARCH,
@@ -382,8 +369,6 @@ def _classify_media_and_web(
                 "question."
             ),
         )
-
-    # 9) Self-contained / reasoning only
     return TaskAnalysis(
         intent=TaskIntent.SELF_CONTAINED,
         needs_external_info=False,
@@ -403,7 +388,7 @@ def _has_digit_or_math(text: str) -> bool:
         or "!" in text
         or any(
             symbol in text
-            for symbol in ("+", "-", "*", "x", "×", "÷", "/")
+            for symbol in ("+", "-", "*", "x", "÷", "/")
         )
     )
 
