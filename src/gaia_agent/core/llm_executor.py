@@ -1,110 +1,176 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
-from gaia_agent.context.ContextBuilder import (
-    ContextBuilder,
-    FinalContext,
-)
-from gaia_agent.core.agent_state import AgentState
 from gaia_agent.llm.client import LLMClient
 from gaia_agent.llm.model import LLMModel
 
+@dataclass(frozen=True, slots=True)
+class LLMExecutionRequest:
+    user_request: str
+    action: str
+
+    context: Any = None
+
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
 
 class LLMExecutor:
+    """
+    Executes one LLM request.
+
+    Responsibilities:
+        - validate request
+        - construct LLM messages
+        - call LLM client
+        - normalize response
+
+    Does NOT:
+        - access AgentState
+        - mutate AgentState
+        - build context
+        - plan
+        - retry
+        - recover
+        - verify
+    """
 
     def __init__(
         self,
         *,
         client: LLMClient,
         model: LLMModel,
-        context_builder: ContextBuilder,
     ) -> None:
-
         self.client = client
         self.model = model
-        self.context_builder = context_builder
 
     async def execute(
         self,
-        state: AgentState,
+        request: LLMExecutionRequest,
     ) -> str:
+       
 
-        context = await self.context_builder.build(
-            state
-        )
+        self._validate_request(request)
 
         messages = self._build_messages(
-            state=state,
-            context=context,
+            request
         )
 
-        result = await self.client.generate(
+        response = await self.client.generate(
             messages=messages,
             model=self.model,
         )
 
-        return self._extract_text(result)
+        return self._extract_text(response)
+    @staticmethod
+    def _validate_request(
+        request: LLMExecutionRequest,
+    ) -> None:
 
+        if not isinstance(
+            request,
+            LLMExecutionRequest,
+        ):
+            raise TypeError(
+                "LLMExecutor.execute() requires "
+                "an LLMExecutionRequest."
+            )
+
+        if not request.user_request.strip():
+            raise ValueError(
+                "user_request cannot be empty."
+            )
+
+        if not request.action.strip():
+            raise ValueError(
+                "action cannot be empty."
+            )
+    @staticmethod
     def _build_messages(
-        self,
-        *,
-        state: AgentState,
-        context: FinalContext,
+        request: LLMExecutionRequest,
     ) -> list[dict[str, str]]:
 
-        context_text = self._format_context(
-            context.items
+        context_text = (
+            LLMExecutor._format_context(
+                request.context
+            )
         )
 
         return [
             {
                 "role": "system",
                 "content": (
-                    "You are the execution component of an AI agent.\n"
-                    "Execute the current planned action with high precision.\n\n"
-                    "CRITICAL OUTPUT RULES FOR EXACT ANSWERS:\n"
-                    "1. Always prioritize factual data provided in the Context over your pre-trained memory.\n"
-                    "2. Extract and output ONLY the exact factual answer, entity, name, date, or number requested.\n"
-                    "3. DO NOT wrap your response in conversational filler or full sentences (e.g., Output 'Beirut' instead of 'The capital of Lebanon is Beirut').\n"
-                    "4. NEVER use approximation or hedge words such as 'approximately', 'about', 'around', or outdated constraints like 'as of 2023'.\n"
-                    "5. Do not fabricate or infer facts not present in the provided context."
+                    "You are the execution component "
+                    "of an AI agent.\n"
+                    "Execute the current planned action "
+                    "with high precision.\n\n"
+                    "CRITICAL OUTPUT RULES:\n"
+                    "1. Prioritize factual information "
+                    "provided in the context.\n"
+                    "2. Return the exact answer requested.\n"
+                    "3. Do not add unnecessary conversational "
+                    "filler.\n"
+                    "4. Do not fabricate facts.\n"
+                    "5. Do not use approximate answers when "
+                    "the context contains an exact answer."
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     f"User question:\n"
-                    f"{state.user_request}\n\n"
+                    f"{request.user_request}\n\n"
                     f"Current action:\n"
-                    f"{state.current_action}\n\n"
+                    f"{request.action}\n\n"
                     f"Context:\n"
                     f"{context_text}"
                 ),
             },
         ]
-
     @staticmethod
     def _format_context(
-        items: list[Any],
+        context: Any,
     ) -> str:
+        if context is None:
+            return (
+                "(No external context is available.)"
+            )
 
-        if not items:
-            return "(No external context is available.)"
+        if isinstance(
+            context,
+            str,
+        ):
+            return context
 
-        return "\n\n".join(
-            str(item)
-            for item in items
-        )
+        if isinstance(
+            context,
+            (list, tuple),
+        ):
+            if not context:
+                return (
+                    "(No external context is available.)"
+                )
 
+            return "\n\n".join(
+                str(item)
+                for item in context
+            )
+
+        return str(context)
     @staticmethod
     def _extract_text(
-        result: Any,
+        response: Any,
     ) -> str:
 
-        if isinstance(result, str):
+        if isinstance(
+            response,
+            str,
+        ):
 
-            text = result.strip()
+            text = response.strip()
 
             if not text:
                 raise ValueError(
@@ -114,12 +180,15 @@ class LLMExecutor:
             return text
 
         content = getattr(
-            result,
+            response,
             "content",
             None,
         )
 
-        if isinstance(content, str):
+        if isinstance(
+            content,
+            str,
+        ):
 
             text = content.strip()
 
@@ -131,12 +200,15 @@ class LLMExecutor:
             return text
 
         text = getattr(
-            result,
+            response,
             "text",
             None,
         )
 
-        if isinstance(text, str):
+        if isinstance(
+            text,
+            str,
+        ):
 
             text = text.strip()
 
@@ -148,6 +220,6 @@ class LLMExecutor:
             return text
 
         raise TypeError(
-            "LLM returned an unsupported response type: "
-            f"{type(result).__name__}"
+            "Unsupported LLM response type: "
+            f"{type(response).__name__}"
         )
