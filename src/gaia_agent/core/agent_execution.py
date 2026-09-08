@@ -5,19 +5,29 @@ from typing import Any
 from uuid import UUID
 
 from gaia_agent.core.agent_state import AgentPhase
-from gaia_agent.core.policies.execution import ExecutionState
-from gaia_agent.core.policies.approval import ApprovalState
-from gaia_agent.core.risk.assessor import RiskContext
+from gaia_agent.core.policies.execution import ExecutionState, ExecutionPolicy
+from gaia_agent.core.policies.approval import ApprovalState, ApprovalPolicy
+from gaia_agent.core.risk.assessor import RiskContext, RiskAssessor
+from gaia_agent.core.llm_executor import LLMExecutor
+from gaia_agent.tools.registry import ToolRegistry
 from gaia_agent.planner.plan_schema import StepType
+
 from gaia_agent.reliability.errors import (
     AgentError,
     ErrorCategory,
     ErrorSeverity,
 )
+from gaia_agent.reliability.error_handler import ErrorHandler
+
 from gaia_agent.observability.events import (
     EventType,
+    EventLogger,
     create_event,
 )
+from gaia_agent.observability.metrics import Metrics
+from gaia_agent.observability.tracer import Tracer
+from gaia_agent.observability.token_tracker import TokenTracker
+
 from gaia_agent.core.evidence import (
     ToolResultRecord,
     ArtifactInfo,
@@ -62,16 +72,16 @@ class AgentExecution:
     def __init__(
         self,
         *,
-        tool_registry: Any,
-        execution_policy: Any,
-        risk_assessor: Any,
-        approval_policy: Any,
-        llm_executor: Any,
-        event_logger: Any,
-        metrics: Any,
-        tracer: Any,
-        token_tracker: Any,
-        error_handler: Any,
+        tool_registry: ToolRegistry,
+        execution_policy: ExecutionPolicy,
+        risk_assessor: RiskAssessor,
+        approval_policy: ApprovalPolicy,
+        llm_executor: LLMExecutor,
+        event_logger: EventLogger,
+        metrics: Metrics,
+        tracer: Tracer,
+        token_tracker: TokenTracker,
+        error_handler: ErrorHandler,
         correlation_id: UUID,
     ) -> None:
 

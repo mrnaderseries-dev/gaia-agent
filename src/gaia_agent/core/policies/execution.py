@@ -52,10 +52,6 @@ class ExecutionState:
 
 
 class ExecutionPolicy:
-    """
-    Validates whether the current execution step
-    is allowed to proceed.
-    """
 
     priority = [
         "Action",
@@ -69,10 +65,6 @@ class ExecutionPolicy:
         state: ExecutionState,
     ) -> ExecutionDecision:
 
-        # ------------------------------------------------------
-        # Already blocked
-        # ------------------------------------------------------
-
         if state.blocked:
 
             return ExecutionDecision.deny(
@@ -80,10 +72,7 @@ class ExecutionPolicy:
                 message="Execution is blocked.",
             )
 
-        # ------------------------------------------------------
-        # Action
-        # ------------------------------------------------------
-
+    
         if not state.action_name:
 
             return ExecutionDecision.deny(
@@ -91,9 +80,6 @@ class ExecutionPolicy:
                 message="Action name not found.",
             )
 
-        # ------------------------------------------------------
-        # TOOL
-        # ------------------------------------------------------
 
         if state.step_type == StepType.TOOL:
 
@@ -106,18 +92,7 @@ class ExecutionPolicy:
                         "for TOOL step."
                     ),
                 )
-
-            # Empty arguments are VALID.
-            #
-            # A tool can legitimately require zero arguments.
-            #
-            # We therefore normalize None -> {} and allow it.
-
             return ExecutionDecision.allow()
-
-        # ------------------------------------------------------
-        # LLM
-        # ------------------------------------------------------
 
         if state.step_type == StepType.LLM:
 
@@ -132,11 +107,6 @@ class ExecutionPolicy:
                 )
 
             return ExecutionDecision.allow()
-
-        # ------------------------------------------------------
-        # Unsupported
-        # ------------------------------------------------------
-
         return ExecutionDecision.deny(
             reason=ExecutionReason.ACTION.value,
             message=(
