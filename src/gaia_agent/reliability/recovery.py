@@ -23,8 +23,6 @@ class Recovery:
         operation: Callable[[AgentError], Awaitable[Any]],
         change_detector: Callable[[Any], bool] | None = None,
     ) -> RecoveryResult:
-   
-
         try:
             result = await operation(error)
 
@@ -33,6 +31,7 @@ class Recovery:
             if change_detector is not None:
                 try:
                     changed = bool(change_detector(result))
+
                 except Exception as exc:
                     recovery_error = AgentError(
                         error_type=type(exc).__name__,
