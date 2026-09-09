@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Generic, TypeVar
+from enum import Enum
+from typing import Any, Awaitable, Callable
 
 from gaia_agent.reliability.error_handler import ErrorHandler
 from gaia_agent.reliability.errors import AgentError
@@ -9,25 +10,30 @@ from gaia_agent.reliability.failure_classifier import (
     FailureClass,
     FailureClassifier,
 )
-from gaia_agent.reliability.retry import Retry
-from gaia_agent.reliability.recovery import Recovery
 from gaia_agent.reliability.policies.recovery_policy import (
     RecoveryAction,
     RecoveryPolicy,
 )
-
 from gaia_agent.reliability.policies.retry_policy import RetryPolicy
+from gaia_agent.reliability.recovery import Recovery, RecoveryResult
+from gaia_agent.reliability.retry import Retry
 
-T = TypeVar("T")
+
+class ReliabilityAction(str, Enum):
+    RETRY = "retry"
+    REPLAN = "replan"
+    STOP = "stop"
+    NONE = "none"
 
 
 @dataclass(frozen=True, slots=True)
-class ReliabilityResult(Generic[T]):
-    success: bool
-    result: T | None = None
+class ReliabilityResult:
+    action: ReliabilityAction
     error: AgentError | None = None
-    attempts: int = 0
+    failure_class: FailureClass | None = None
+    attempt: int = 0
     recovery_attempted: bool = False
+    recovery_result: RecoveryResult | None = None
     reason: str = ""
 
 
@@ -49,134 +55,145 @@ class ReliabilityEngine:
         self.retry = retry
         self.recovery = recovery
 
-    async def execute(
+    async def handle_failure(
         self,
-        operation: Callable[[], Awaitable[T]],
         *,
-        operation_name: str,
-        source: str,
-        validator: Callable[[T], bool] | None = None,
-        recovery_operation: Callable[[AgentError], Awaitable[Any]] | None = None,
-        max_attempts: int = 3,
-    ) -> ReliabilityResult[T]:
+        error: AgentError,
+        attempt: int,
+        max_attempts: int,
+        recovery_operation: Callable[[], Awaitable[Any]] | None = None,
+        change_detector: Callable[[Any], bool] | None = None,
+    ) -> ReliabilityResult:
+        if not isinstance(error, AgentError):
+            raise TypeError(
+                "ReliabilityEngine.handle_failure() expects an AgentError."
+            )
+
+        if not isinstance(attempt, int) or isinstance(attempt, bool):
+            raise TypeError("attempt must be an integer.")
+
         if not isinstance(max_attempts, int) or isinstance(max_attempts, bool):
             raise TypeError("max_attempts must be an integer.")
+
+        if attempt <= 0:
+            raise ValueError("attempt must be greater than zero.")
 
         if max_attempts <= 0:
             raise ValueError("max_attempts must be greater than zero.")
 
-        last_error: AgentError | None = None
+        normalized_error = self.error_handler.handle(error)
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                result = await operation()
+        failure_class = self.failure_classifier.classify(
+            normalized_error
+        )
 
-                if validator is not None and not validator(result):
-                    raise ValueError(
-                        f"{operation_name} returned an invalid result."
-                    )
+        if attempt < max_attempts:
+            retry_decision = self.retry_policy.evaluate(
+                failure_class,
+                current_attempt=attempt,
+            )
 
-                return ReliabilityResult(
-                    success=True,
-                    result=result,
-                    attempts=attempt,
-                    recovery_attempted=False,
-                    reason="Operation succeeded.",
+            if retry_decision.should_retry:
+                await self.retry.delay(
+                    retry_decision.delay
                 )
 
-            except Exception as exc:
-                error = self.error_handler.handle(
-                    exc,
-                    source=source,
-                    operation=operation_name,
+                return ReliabilityResult(
+                    action=ReliabilityAction.RETRY,
+                    error=normalized_error,
+                    failure_class=failure_class,
                     attempt=attempt,
+                    reason=retry_decision.reason,
                 )
 
-                last_error = error
-
-                failure_class = self.failure_classifier.classify(error)
-
-                if attempt < max_attempts:
-                    retry_decision = self.retry_policy.evaluate(
-                        failure_class,
-                        current_attempt=attempt,
-                    )
-
-                    if retry_decision.should_retry:
-                        await self.retry.delay(retry_decision.delay)
-                        continue
-
-                recovery_decision = self.recovery_policy.evaluate(
-                    failure_class
-                )
-
-                if (
-                    recovery_decision.action == RecoveryAction.REPLAN
-                    and recovery_operation is not None
-                ):
-                    return await self._execute_recovery(
-                        error=error,
-                        attempts=attempt,
-                        recovery_operation=recovery_operation,
-                    )
-
-                return ReliabilityResult(
-                    success=False,
-                    error=last_error,
-                    attempts=attempt,
-                    recovery_attempted=False,
-                    reason=(
-                        recovery_decision.reason
-                        or last_error.message
-                    ),
-                )
-
-        return ReliabilityResult(
-            success=False,
-            error=last_error,
-            attempts=max_attempts,
-            recovery_attempted=False,
-            reason=(
-                last_error.message
-                if last_error is not None
-                else "Operation failed."
-            ),
+        recovery_decision = self.recovery_policy.evaluate(
+            failure_class
         )
 
-    async def _execute_recovery(
-        self,
-        *,
-        error: AgentError,
-        attempts: int,
-        recovery_operation: Callable[[AgentError], Awaitable[Any]],
-    ) -> ReliabilityResult[T]:
-        recovery_result = await self.recovery.execute(
-            error=error,
-            operation=recovery_operation,
-        )
-
-        if not recovery_result.recovered:
-            recovery_error = recovery_result.error or error
-
-            return ReliabilityResult(
-                success=False,
-                error=recovery_error,
-                attempts=attempts,
-                recovery_attempted=True,
-                reason=(
-                    recovery_result.reason
-                    or recovery_error.message
-                ),
+        if recovery_decision.action == RecoveryAction.REPLAN:
+            return await self._handle_replan(
+                error=normalized_error,
+                failure_class=failure_class,
+                attempt=attempt,
+                recovery_operation=recovery_operation,
+                change_detector=change_detector,
             )
 
         return ReliabilityResult(
-            success=False,
-            result=None,
+            action=ReliabilityAction.STOP,
+            error=normalized_error,
+            failure_class=failure_class,
+            attempt=attempt,
+            reason=recovery_decision.reason,
+        )
+
+    async def _handle_replan(
+        self,
+        *,
+        error: AgentError,
+        failure_class: FailureClass,
+        attempt: int,
+        recovery_operation: Callable[[], Awaitable[Any]] | None,
+        change_detector: Callable[[Any], bool] | None,
+    ) -> ReliabilityResult:
+        if recovery_operation is None:
+            return ReliabilityResult(
+                action=ReliabilityAction.STOP,
+                error=error,
+                failure_class=failure_class,
+                attempt=attempt,
+                reason="No recovery operation was supplied.",
+            )
+
+        if change_detector is None:
+            return ReliabilityResult(
+                action=ReliabilityAction.STOP,
+                error=error,
+                failure_class=failure_class,
+                attempt=attempt,
+                reason="No change detector was supplied.",
+            )
+
+        try:
+            recovery_result = await self.recovery.execute(
+                operation=recovery_operation,
+                change_detector=change_detector,
+            )
+
+        except Exception as exc:
+            recovery_error = self.error_handler.handle(
+                exc,
+                source="reliability",
+                operation="recovery",
+                attempt=attempt,
+            )
+
+            return ReliabilityResult(
+                action=ReliabilityAction.STOP,
+                error=recovery_error,
+                failure_class=FailureClass.UNKNOWN,
+                attempt=attempt,
+                recovery_attempted=True,
+                reason=recovery_error.message,
+            )
+
+        if recovery_result.recovered:
+            return ReliabilityResult(
+                action=ReliabilityAction.REPLAN,
+                error=error,
+                failure_class=failure_class,
+                attempt=attempt,
+                recovery_attempted=True,
+                recovery_result=recovery_result,
+                reason=recovery_result.reason,
+            )
+
+        return ReliabilityResult(
+            action=ReliabilityAction.STOP,
             error=error,
-            attempts=attempts,
+            failure_class=failure_class,
+            attempt=attempt,
             recovery_attempted=True,
-            reason=(
-                recovery_result.reason
-                or "Recovery completed; task execution must continue."
-            ),
+            recovery_result=recovery_result,
+            reason=recovery_result.reason,
         )
