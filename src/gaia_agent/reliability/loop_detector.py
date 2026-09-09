@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from enum import Enum
 from typing import Any, Callable, Sequence
 
-from gaia_agent.schemas.plan_schema import PlanStep, StepType
+from gaia_agent.planner.plan_schema import PlanStep, StepType
 
 
 class LoopType(str, Enum):
