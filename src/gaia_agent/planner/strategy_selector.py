@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Sequence
 
 from .task_classifier import TaskAnalysis, TaskIntent
 
@@ -39,7 +38,16 @@ class StrategyContext:
     def has_image(self) -> bool:
         return any(
             Path(name).suffix.lower()
-            in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
+            in {
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".webp",
+                ".gif",
+                ".bmp",
+                ".tiff",
+                ".tif",
+            }
             for name in self.available_files
         )
 
@@ -47,12 +55,25 @@ class StrategyContext:
     def has_spreadsheet(self) -> bool:
         return any(
             Path(name).suffix.lower()
-            in {".xlsx", ".xls", ".xlsm", ".csv"}
+            in {
+                ".xlsx",
+                ".xls",
+                ".xlsm",
+                ".csv",
+            }
             for name in self.available_files
         )
 
 
 class StrategySelector:
+    """
+    Deterministic task-to-strategy selection.
+
+    This class selects a strategy family, not an arbitrary tool.
+    The Planner may still ask the LLM to construct the detailed
+    multi-step plan, but the selected family becomes a hard
+    semantic constraint.
+    """
 
     _NON_TRANSIENT_FAILURE_MARKERS = (
         "capability",
@@ -85,7 +106,9 @@ class StrategySelector:
         if analysis.intent == TaskIntent.ARITHMETIC:
             return StrategyDecision(
                 StrategyFamily.LOCAL_COMPUTATION,
-                "python_interpreter" if "python_interpreter" in tools else None,
+                "python_interpreter"
+                if "python_interpreter" in tools
+                else None,
                 "Arithmetic is a local deterministic computation.",
                 "python_interpreter" in tools,
             )
@@ -93,15 +116,22 @@ class StrategySelector:
         if analysis.intent == TaskIntent.TEXT_TRANSFORMATION:
             return StrategyDecision(
                 StrategyFamily.LOCAL_TRANSFORMATION,
-                "python_interpreter" if "python_interpreter" in tools else None,
-                "Text transformation is self-contained and does not require retrieval.",
+                "python_interpreter"
+                if "python_interpreter" in tools
+                else None,
+                (
+                    "Text transformation is self-contained and "
+                    "does not require retrieval."
+                ),
                 "python_interpreter" in tools,
             )
 
         if analysis.intent == TaskIntent.URL_PAGE:
             return StrategyDecision(
                 StrategyFamily.DIRECT_URL,
-                "visit_webpage" if "visit_webpage" in tools else None,
+                "visit_webpage"
+                if "visit_webpage" in tools
+                else None,
                 "A direct URL should be accessed directly before search.",
                 "visit_webpage" in tools,
             )
@@ -111,14 +141,22 @@ class StrategySelector:
                 return StrategyDecision(
                     StrategyFamily.VISION,
                     "analyze_image",
-                    "A real local image exists, so vision analysis is the correct capability.",
+                    (
+                        "A real local image exists, so vision analysis "
+                        "is the correct capability."
+                    ),
                     True,
                 )
 
             return StrategyDecision(
                 StrategyFamily.VISION,
-                "analyze_image" if "analyze_image" in tools else None,
-                "The task is image-oriented; use vision when a real image can be resolved.",
+                "analyze_image"
+                if "analyze_image" in tools
+                else None,
+                (
+                    "The task is image-oriented; use vision when a "
+                    "real image can be resolved."
+                ),
                 False,
             )
 
@@ -127,7 +165,10 @@ class StrategySelector:
                 return StrategyDecision(
                     StrategyFamily.FILE_ANALYSIS,
                     "analyze_excel",
-                    "A spreadsheet artifact exists and should be analyzed with the spreadsheet tool.",
+                    (
+                        "A spreadsheet artifact exists and should be "
+                        "analyzed with the spreadsheet tool."
+                    ),
                     True,
                 )
 
@@ -135,24 +176,49 @@ class StrategySelector:
                 return StrategyDecision(
                     StrategyFamily.FILE_READING,
                     "file_reader",
-                    "A real local artifact exists and should be read directly.",
+                    (
+                        "A real local artifact exists and should be "
+                        "read directly."
+                    ),
                     True,
                 )
 
         if analysis.intent == TaskIntent.AUDIO_VIDEO:
-        
-            if "web_search" in tools:
+            media_tools = (
+                "youtube_transcript",
+                "transcribe_audio",
+                "video_reader",
+                "audio_reader",
+                "analyze_video",
+            )
+
+            available_media_tool = next(
+                (
+                    tool
+                    for tool in media_tools
+                    if tool in tools
+                ),
+                None,
+            )
+
+            if available_media_tool is not None:
                 return StrategyDecision(
-                    StrategyFamily.WEB_RETRIEVAL,
-                    "web_search",
-                    "No dedicated media capability is available; focused retrieval is the fallback.",
-                    False,
+                    StrategyFamily.AUDIO_VIDEO,
+                    available_media_tool,
+                    (
+                        "A dedicated media capability is available "
+                        "for the task."
+                    ),
+                    True,
                 )
 
             return StrategyDecision(
                 StrategyFamily.AUDIO_VIDEO,
                 None,
-                "The task requires media capability that is not currently registered.",
+                (
+                    "The task requires audio/video capability, "
+                    "but no dedicated media tool is registered."
+                ),
                 False,
             )
 
@@ -175,8 +241,13 @@ class StrategySelector:
 
             return StrategyDecision(
                 StrategyFamily.WEB_RETRIEVAL,
-                "web_search" if "web_search" in tools else None,
-                "External factual evidence is required when a retrieval tool exists.",
+                "web_search"
+                if "web_search" in tools
+                else None,
+                (
+                    "External factual evidence is required when a "
+                    "retrieval tool exists."
+                ),
                 False,
             )
 
@@ -192,15 +263,23 @@ class StrategySelector:
         analysis: TaskAnalysis,
         context: StrategyContext,
     ) -> StrategyDecision | None:
-        failure = (context.failure_type or "").lower().replace("-", "_")
+        failure = (
+            context.failure_type
+            or ""
+        ).lower().replace("-", "_")
+
         failed = context.failed_strategy
 
-        if any(marker in failure for marker in self._INVALID_ARGUMENT_MARKERS):
-           
+        if any(
+            marker in failure
+            for marker in self._INVALID_ARGUMENT_MARKERS
+        ):
             return self.select(analysis, context)
 
-        if not any(marker in failure for marker in self._NON_TRANSIENT_FAILURE_MARKERS):
-        
+        if not any(
+            marker in failure
+            for marker in self._NON_TRANSIENT_FAILURE_MARKERS
+        ):
             return None
 
         candidates: list[StrategyDecision] = []
@@ -210,20 +289,29 @@ class StrategySelector:
 
         tools = context.available_tools
 
-        if analysis.intent == TaskIntent.URL_PAGE and "visit_webpage" in tools:
+        if (
+            analysis.intent == TaskIntent.URL_PAGE
+            and "visit_webpage" in tools
+        ):
             candidates.insert(
                 0,
                 StrategyDecision(
                     StrategyFamily.DIRECT_URL,
                     "visit_webpage",
-                    "Use the exact URL instead of the failed retrieval strategy.",
+                    (
+                        "Use the exact URL instead of the failed "
+                        "retrieval strategy."
+                    ),
                     True,
                 ),
             )
 
         if (
             analysis.intent
-            in (TaskIntent.ARITHMETIC, TaskIntent.TEXT_TRANSFORMATION)
+            in (
+                TaskIntent.ARITHMETIC,
+                TaskIntent.TEXT_TRANSFORMATION,
+            )
             and "python_interpreter" in tools
         ):
             candidates.insert(
@@ -233,7 +321,10 @@ class StrategySelector:
                     if analysis.intent == TaskIntent.ARITHMETIC
                     else StrategyFamily.LOCAL_TRANSFORMATION,
                     "python_interpreter",
-                    "Fall back to deterministic local computation/transformation.",
+                    (
+                        "Fall back to deterministic local computation/"
+                        "transformation."
+                    ),
                     True,
                 ),
             )
@@ -248,7 +339,10 @@ class StrategySelector:
                 StrategyDecision(
                     StrategyFamily.VISION,
                     "analyze_image",
-                    "Use the real local image instead of external retrieval.",
+                    (
+                        "Use the real local image instead of external "
+                        "retrieval."
+                    ),
                     True,
                 ),
             )
