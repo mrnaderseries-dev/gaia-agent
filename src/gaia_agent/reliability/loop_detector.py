@@ -1,371 +1,458 @@
 from __future__ import annotations
 
-from collections import Counter, deque
+import json
+import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from enum import Enum
-from hashlib import sha256
-from typing import Any
+from typing import Any, Callable, Sequence
+
+from gaia_agent.schemas.plan_schema import PlanStep, StepType
 
 
 class LoopType(str, Enum):
-    PLAN = "plan"
+    NONE = "none"
     EXACT = "exact"
-    SEQUENCE = "sequence"
+    STRUCTURAL = "structural"
+    SEMANTIC = "semantic"
 
 
 @dataclass(frozen=True, slots=True)
-class LoopDetectionResult:
+class LoopDetection:
     detected: bool
-    loop_type: LoopType | None
-    repetition_count: int
-    sequence_length: int
-    fingerprint: str | None
-    message: str = ""
+    loop_type: LoopType = LoopType.NONE
+    similarity: float = 0.0
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class StepSignature:
+    exact: str
+    structural: str
+    semantic: str
 
 
 class LoopDetector:
+    """
+    Detects repeated execution attempts at three levels:
+
+    1. EXACT
+       Same step type, tool and arguments.
+
+    2. STRUCTURAL
+       Same execution structure and strategy family.
+
+    3. SEMANTIC
+       Same underlying execution objective even when:
+         - action wording changes
+         - tool changes
+         - strategy family changes
+         - argument wording changes
+
+    The detector is intentionally deterministic.
+    It does not own planning, recovery or retry decisions.
+    """
 
     def __init__(
         self,
         *,
+        semantic_threshold: float = 0.88,
         max_history: int = 50,
-        max_sequence_length: int = 10,
-        exact_repetition_threshold: int = 3,
-        sequence_repetition_threshold: int = 3,
     ) -> None:
+        if not 0.0 <= semantic_threshold <= 1.0:
+            raise ValueError(
+                "semantic_threshold must be between 0 and 1."
+            )
 
         if max_history <= 0:
             raise ValueError(
-                "max_history must be greater than 0."
+                "max_history must be greater than zero."
             )
 
-        if max_sequence_length <= 0:
-            raise ValueError(
-                "max_sequence_length must be greater than 0."
-            )
-
-        if exact_repetition_threshold <= 1:
-            raise ValueError(
-                "exact_repetition_threshold must be greater than 1."
-            )
-
-        if sequence_repetition_threshold <= 1:
-            raise ValueError(
-                "sequence_repetition_threshold must be greater than 1."
-            )
-
+        self.semantic_threshold = semantic_threshold
         self.max_history = max_history
-        self.max_sequence_length = max_sequence_length
-
-        self.exact_repetition_threshold = (
-            exact_repetition_threshold
-        )
-
-        self.sequence_repetition_threshold = (
-            sequence_repetition_threshold
-        )
-
-        # History of execution signatures.
-        self._history: deque[str] = deque(
-            maxlen=max_history
-        )
-
-        # History of plans.
-        self._plan_history: deque[str] = deque(
-            maxlen=max_history
-        )
-
-        # Number of exact executions.
-        self._exact_counts: Counter[str] = Counter()
-
-        # Number of exact plans.
-        self._plan_counts: Counter[str] = Counter()
-
+        self._history: list[StepSignature] = []
     def check(
         self,
+        step: PlanStep,
         *,
-        action: str | None = None,
-        tool_name: str | None = None,
-        arguments: dict[str, Any] | None = None,
-    ) -> LoopDetectionResult:
+        strategy_family: str,
+    ) -> LoopDetection:
+        """
+        Check whether a step repeats something already executed.
 
-        execution = {
-            "action": action,
-            "tool_name": tool_name,
-            "arguments": arguments,
-        }
+        Does not mutate detector history.
+        """
 
-        fingerprint = self._fingerprint(
-            execution
+        candidate = self.signature(
+            step,
+            strategy_family=strategy_family,
         )
-
-        self._history.append(
-            fingerprint
-        )
-
-        self._exact_counts[fingerprint] += 1
-
-        exact_count = self._exact_counts[
-            fingerprint
-        ]
-
-        
-        if (
-            exact_count
-            >= self.exact_repetition_threshold
-        ):
-
-            return LoopDetectionResult(
-                detected=True,
-                loop_type=LoopType.EXACT,
-                repetition_count=exact_count,
-                sequence_length=1,
-                fingerprint=fingerprint,
-                message=(
-                    "The same execution "
-                    "was repeated repeatedly."
-                ),
-            )
-
-        sequence_result = (
-            self._detect_repeating_sequence()
-        )
-
-        if sequence_result is not None:
-            return sequence_result
-        return LoopDetectionResult(
-            detected=False,
-            loop_type=None,
-            repetition_count=exact_count,
-            sequence_length=1,
-            fingerprint=fingerprint,
-            message="No execution loop detected.",
-        )
-
-   
-    def check_plan(
-        self,
-        plan: list[Any],
-    ) -> LoopDetectionResult:
-
-        fingerprint = self._fingerprint(
-            plan
-        )
-
-        self._plan_history.append(
-            fingerprint
-        )
-
-        self._plan_counts[fingerprint] += 1
-
-        count = self._plan_counts[
-            fingerprint
-        ]
-
-        if (
-            count
-            >= self.exact_repetition_threshold
-        ):
-
-            return LoopDetectionResult(
-                detected=True,
-                loop_type=LoopType.PLAN,
-                repetition_count=count,
-                sequence_length=1,
-                fingerprint=fingerprint,
-                message=(
-                    "The same execution plan "
-                    "was produced repeatedly."
-                ),
-            )
-
-        return LoopDetectionResult(
-            detected=False,
-            loop_type=None,
-            repetition_count=count,
-            sequence_length=1,
-            fingerprint=fingerprint,
-            message="No plan loop detected.",
-        )
-    
-    def _detect_repeating_sequence(
-        self,
-    ) -> LoopDetectionResult | None:
-
-        history = list(
-            self._history
-        )
-
-        history_size = len(history)
-
-     
-        max_length = min(
-            self.max_sequence_length,
-            history_size // 2,
-        )
-
-        for sequence_length in range(
-            1,
-            max_length + 1,
-        ):
-
-            pattern = history[
-                -sequence_length:
-            ]
-
-            repetitions = 1
-
-            index = (
-                history_size
-                - (sequence_length * 2)
-            )
-
-            while index >= 0:
-
-                previous = history[
-                    index:
-                    index + sequence_length
-                ]
-
-                if previous != pattern:
-                    break
-
-                repetitions += 1
-
-                index -= sequence_length
-
-            if (
-                repetitions
-                >= self.sequence_repetition_threshold
-            ):
-
-                fingerprint = self._fingerprint(
-                    pattern
-                )
-
-                return LoopDetectionResult(
+        for previous in reversed(self._history):
+            if candidate.exact == previous.exact:
+                return LoopDetection(
                     detected=True,
-                    loop_type=LoopType.SEQUENCE,
-                    repetition_count=repetitions,
-                    sequence_length=sequence_length,
-                    fingerprint=fingerprint,
-                    message=(
-                        "A repeating execution "
-                        "sequence was detected."
+                    loop_type=LoopType.EXACT,
+                    similarity=1.0,
+                    reason=(
+                        "The exact execution step was repeated."
+                    ),
+                )
+        for previous in reversed(self._history):
+            if candidate.structural == previous.structural:
+                return LoopDetection(
+                    detected=True,
+                    loop_type=LoopType.STRUCTURAL,
+                    similarity=1.0,
+                    reason=(
+                        "The same execution structure and "
+                        "strategy were repeated."
                     ),
                 )
 
-        return None
 
-   
+        for previous in reversed(self._history):
+            similarity = SequenceMatcher(
+                None,
+                candidate.semantic,
+                previous.semantic,
+            ).ratio()
+
+            if similarity >= self.semantic_threshold:
+                return LoopDetection(
+                    detected=True,
+                    loop_type=LoopType.SEMANTIC,
+                    similarity=similarity,
+                    reason=(
+                        "The proposed execution is semantically "
+                        "equivalent to a previous execution."
+                    ),
+                )
+
+        return LoopDetection(detected=False)
+
+    def record(
+        self,
+        step: PlanStep,
+        *,
+        strategy_family: str,
+    ) -> None:
+
+        self._history.append(
+            self.signature(
+                step,
+                strategy_family=strategy_family,
+            )
+        )
+
+        if len(self._history) > self.max_history:
+            self._history = self._history[
+                -self.max_history:
+            ]
+
+    def check_and_record(
+        self,
+        step: PlanStep,
+        *,
+        strategy_family: str,
+    ) -> LoopDetection:
+
+        result = self.check(
+            step,
+            strategy_family=strategy_family,
+        )
+
+        if not result.detected:
+            self.record(
+                step,
+                strategy_family=strategy_family,
+            )
+
+        return result
+
+    def check_plan(
+        self,
+        steps: Sequence[PlanStep],
+        *,
+        strategy_family_resolver: Callable[[PlanStep], str],
+    ) -> LoopDetection:
+        """
+        Detect repeated execution inside one generated plan.
+
+        The resolver belongs to the Planner/StrategySelector layer.
+        LoopDetector does not know how strategy families are calculated.
+        """
+
+        seen: list[StepSignature] = []
+
+        for step in steps:
+            if step.is_final_answer:
+                continue
+
+            strategy_family = strategy_family_resolver(step)
+
+            current = self.signature(
+                step,
+                strategy_family=strategy_family,
+            )
+
+            for previous in seen:
+                if current.exact == previous.exact:
+                    return LoopDetection(
+                        detected=True,
+                        loop_type=LoopType.EXACT,
+                        similarity=1.0,
+                        reason=(
+                            "Plan contains repeated execution."
+                        ),
+                    )
+
+                if current.structural == previous.structural:
+                    return LoopDetection(
+                        detected=True,
+                        loop_type=LoopType.STRUCTURAL,
+                        similarity=1.0,
+                        reason=(
+                            "Plan contains repeated execution "
+                            "with the same strategy."
+                        ),
+                    )
+
+                similarity = SequenceMatcher(
+                    None,
+                    current.semantic,
+                    previous.semantic,
+                ).ratio()
+
+                if similarity >= self.semantic_threshold:
+                    return LoopDetection(
+                        detected=True,
+                        loop_type=LoopType.SEMANTIC,
+                        similarity=similarity,
+                        reason=(
+                            "Plan contains semantically repeated "
+                            "execution."
+                        ),
+                    )
+
+            seen.append(current)
+
+        return LoopDetection(detected=False)
+
     def reset(self) -> None:
+        """Clear execution history."""
 
         self._history.clear()
 
-        self._plan_history.clear()
-
-        self._exact_counts.clear()
-
-        self._plan_counts.clear()
-
-    def _fingerprint(
+    def signature(
         self,
-        value: Any,
-    ) -> str:
+        step: PlanStep,
+        *,
+        strategy_family: str,
+    ) -> StepSignature:
+        """
+        Build all three signatures for a step.
+        """
 
-        normalized = self._normalize(
-            value
+        normalized_action = self._normalize_text(
+            step.action
         )
 
-        serialized = repr(
-            normalized
+        normalized_tool = self._normalize_text(
+            step.tool_name or ""
         )
 
-        return sha256(
-            serialized.encode("utf-8")
-        ).hexdigest()
+        normalized_arguments = self._normalize_arguments(
+            step.arguments or {}
+        )
+        exact_payload = {
+            "step_type": step.step_type.value,
+            "tool": normalized_tool,
+            "arguments": normalized_arguments,
+        }
 
-    def _normalize(
-        self,
+      
+
+        structural_payload = {
+            "step_type": step.step_type.value,
+            "strategy_family": self._normalize_text(
+                strategy_family
+            ),
+            "tool": normalized_tool,
+            "argument_keys": sorted(
+                normalized_arguments.keys()
+            ),
+        }
+
+        semantic_payload = {
+            "action": self._semantic_text(
+                normalized_action
+            ),
+            "arguments": self._semantic_arguments(
+                normalized_arguments
+            ),
+        }
+
+        return StepSignature(
+            exact=self._serialize(exact_payload),
+            structural=self._serialize(
+                structural_payload
+            ),
+            semantic=self._serialize(
+                semantic_payload
+            ),
+        )
+
+    @staticmethod
+    def _serialize(value: Any) -> str:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        text = str(value or "").lower()
+
+        text = re.sub(
+            r"\s+",
+            " ",
+            text,
+        )
+
+        text = re.sub(
+            r"[^\w\s:/.-]",
+            " ",
+            text,
+        )
+
+        return text.strip()
+
+    @classmethod
+    def _normalize_arguments(
+        cls,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            str(key).lower(): cls._normalize_value(
+                value
+            )
+            for key, value in sorted(
+                arguments.items()
+            )
+        }
+
+    @classmethod
+    def _normalize_value(
+        cls,
         value: Any,
     ) -> Any:
-
-        if value is None:
-            return None
-
-        
-        if isinstance(
-            value,
-            (str, int, float, bool),
-        ):
-            return value
-
-  
         if isinstance(value, dict):
-
-            return tuple(
-                sorted(
-                    (
-                        str(key),
-                        self._normalize(item),
-                    )
-                    for key, item in value.items()
+            return {
+                str(key).lower(): cls._normalize_value(
+                    item
                 )
-            )
+                for key, item in sorted(
+                    value.items()
+                )
+            }
 
-       
-        if isinstance(
-            value,
-            (list, tuple),
-        ):
-
-            return tuple(
-                self._normalize(item)
-                for item in value
-            )
-
-   
-        if isinstance(value, set):
-
-            items = [
-                self._normalize(item)
+        if isinstance(value, (list, tuple)):
+            return [
+                cls._normalize_value(item)
                 for item in value
             ]
 
-            return tuple(
-                sorted(
-                    items,
-                    key=repr,
+        if isinstance(value, str):
+            return re.sub(
+                r"\s+",
+                " ",
+                value.strip().lower(),
+            )
+
+        return value
+    @classmethod
+    def _semantic_text(
+        cls,
+        text: str,
+    ) -> str:
+        words = re.findall(
+            r"[a-z0-9_:/.-]+",
+            text.lower(),
+        )
+
+        stop_words = {
+            "a",
+            "an",
+            "the",
+            "to",
+            "of",
+            "for",
+            "and",
+            "with",
+            "using",
+            "use",
+            "please",
+            "find",
+            "search",
+            "look",
+            "lookup",
+            "get",
+            "retrieve",
+            "obtain",
+            "execute",
+            "perform",
+            "run",
+            "do",
+            "make",
+            "try",
+            "attempt",
+            "relevant",
+            "alternative",
+            "another",
+            "method",
+            "way",
+        }
+
+        meaningful = [
+            word
+            for word in words
+            if word not in stop_words
+        ]
+
+        return " ".join(
+            sorted(meaningful)
+        )
+
+    @classmethod
+    def _semantic_arguments(
+        cls,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+
+        for key, value in arguments.items():
+            if isinstance(value, str):
+                result[key] = cls._semantic_text(
+                    value
                 )
-            )
 
-      
-        if hasattr(
-            value,
-            "model_dump",
-        ):
+            elif isinstance(value, dict):
+                result[key] = cls._semantic_arguments(
+                    value
+                )
 
-            return self._normalize(
-                value.model_dump()
-            )
+            elif isinstance(value, list):
+                result[key] = [
+                    cls._semantic_text(item)
+                    if isinstance(item, str)
+                    else item
+                    for item in value
+                ]
 
-      
-        if hasattr(
-            value,
-            "dict",
-        ):
+            else:
+                result[key] = value
 
-            return self._normalize(
-                value.dict()
-            )
-
-        if hasattr(
-            value,
-            "dict",
-        ):
-
-            return self._normalize(
-                vars(value)
-            )
-
-        return str(value)
+        return result
