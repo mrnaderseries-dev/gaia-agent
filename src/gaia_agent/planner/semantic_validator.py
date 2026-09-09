@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
-from plan_schema import PlanSchema, PlanStep, StepType
-from strategy_selector import StrategyDecision, StrategyFamily
-from task_classifier import TaskAnalysis, TaskIntent
+from .plan_schema import PlanSchema, PlanStep, StepType
+from .strategy_selector import StrategyDecision
+from .task_classifier import TaskAnalysis, TaskIntent
 
 
 class SemanticPlanError(ValueError):
@@ -13,7 +13,14 @@ class SemanticPlanError(ValueError):
 
 
 class SemanticPlanValidator:
-    """Validates whether a PlanSchema matches the task's selected strategy."""
+    """Validate semantic correctness after structural PlanSchema validation.
+
+    Structural validation answers whether a plan is syntactically valid.
+    This validator answers whether that valid plan actually matches the
+    classified task and selected strategy. Strategy-family resolution is
+    deliberately delegated to Planner/StrategySelector so this class does
+    not maintain a second source of truth.
+    """
 
     def validate(
         self,
@@ -24,6 +31,7 @@ class SemanticPlanValidator:
         available_files: Sequence[str] = (),
         failed_strategy: str | None = None,
         failure_type: str | None = None,
+        strategy_family_resolver: Callable[[PlanStep], str] | None = None,
     ) -> None:
         for step in plan.steps:
             if step.step_type != StepType.TOOL or step.is_final_answer:
@@ -36,10 +44,15 @@ class SemanticPlanValidator:
             )
 
         if failed_strategy and failure_type:
+            if strategy_family_resolver is None:
+                raise SemanticPlanError(
+                    "strategy_family_resolver is required for recovery validation."
+                )
             self._validate_recovery_family(
                 plan,
                 failed_strategy=failed_strategy,
                 failure_type=failure_type,
+                strategy_family_resolver=strategy_family_resolver,
             )
 
     def _validate_tool_step(
@@ -114,6 +127,7 @@ class SemanticPlanValidator:
         *,
         failed_strategy: str,
         failure_type: str,
+        strategy_family_resolver: Callable[[PlanStep], str],
     ) -> None:
         normalized = failure_type.lower().replace("-", "_").replace(" ", "_")
         invalid_args = any(
@@ -132,23 +146,10 @@ class SemanticPlanValidator:
             return
 
         families = {
-            SemanticPlanValidator.strategy_family(step)
+            strategy_family_resolver(step)
             for step in non_final
         }
         if families == {failed_strategy}:
             raise SemanticPlanError(
                 f"Recovery kept the failed strategy family '{failed_strategy}'."
             )
-
-    @staticmethod
-    def strategy_family(step: PlanStep) -> str:
-        if step.step_type == StepType.LLM:
-            return StrategyFamily.LLM_ONLY.value
-        return {
-            "web_search": StrategyFamily.WEB_RETRIEVAL.value,
-            "visit_webpage": StrategyFamily.DIRECT_URL.value,
-            "analyze_image": StrategyFamily.VISION.value,
-            "analyze_excel": StrategyFamily.FILE_ANALYSIS.value,
-            "file_reader": StrategyFamily.FILE_READING.value,
-            "python_interpreter": StrategyFamily.LOCAL_COMPUTATION.value,
-        }.get(step.tool_name or "", f"TOOL:{step.tool_name or 'UNKNOWN'}")
