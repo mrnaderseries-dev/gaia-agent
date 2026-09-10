@@ -6,22 +6,30 @@ from typing import Any, Protocol
 
 from smolagents import Tool
 
+from gaia_agent.planner.tool_spec import (
+    ToolCapability,
+    ToolErrorCode,
+    ToolModality,
+    ToolSpec,
+)
 from gaia_agent.tools.path_utils import (
     is_placeholder_path,
     resolve_file,
 )
 
 
-SUPPORTED_AUDIO_EXTENSIONS = {
-    ".wav",
-    ".mp3",
-    ".m4a",
-    ".flac",
-    ".ogg",
-    ".webm",
-    ".aac",
-    ".wma",
-}
+SUPPORTED_AUDIO_EXTENSIONS = frozenset(
+    {
+        ".wav",
+        ".mp3",
+        ".m4a",
+        ".flac",
+        ".ogg",
+        ".webm",
+        ".aac",
+        ".wma",
+    }
+)
 
 
 class STTBackend(Protocol):
@@ -50,7 +58,6 @@ class FasterWhisperBackend:
         self.device = device
         self.compute_type = compute_type
         self.download_root = download_root
-
         self._model: Any = None
         self._lock = Lock()
 
@@ -157,6 +164,45 @@ class TranscribeAudioTool(Tool):
         self.stt_backend = stt_backend
         self.base_dir = Path(base_dir).resolve()
 
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            arguments_schema={
+                "type": "object",
+                "properties": {
+                    "audio_path": {
+                        "type": "string",
+                        "description": (
+                            "Path to the audio file relative "
+                            "to the allowed base directory "
+                            "or filename."
+                        ),
+                    },
+                },
+                "required": ["audio_path"],
+                "additionalProperties": False,
+            },
+            capability=ToolCapability.READ_ONLY,
+            modalities=frozenset(
+                {ToolModality.AUDIO}
+            ),
+            result_schema={
+                "type": "string",
+            },
+            error_codes=frozenset(
+                {
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    ToolErrorCode.FILE_NOT_FOUND,
+                    ToolErrorCode.UNSUPPORTED_FORMAT,
+                    ToolErrorCode.EXECUTION_FAILED,
+                }
+            ),
+            allowed_imports=frozenset(),
+            function=self.forward,
+        )
+
     def forward(
         self,
         audio_path: str,
@@ -210,7 +256,6 @@ class TranscribeAudioTool(Tool):
                 )
 
             transcript = self.stt_backend.transcribe(path)
-
             transcript = str(transcript).strip()
 
             if not transcript:
@@ -247,21 +292,10 @@ class AudioTools:
         )
 
     def get_tools(self) -> list[Tool]:
-        tools: list[Tool] = [
+        return [
             TranscribeAudioTool(
                 stt_backend=self.stt_backend,
                 base_dir=str(self.base_dir),
             )
         ]
-
-        try:
-            from smolagents import YoutubeTranscriptTool
-        except ImportError:
-            YoutubeTranscriptTool = None
-
-        if YoutubeTranscriptTool is not None:
-            tools.append(
-                YoutubeTranscriptTool()
-            )
-
-        return tools
+    

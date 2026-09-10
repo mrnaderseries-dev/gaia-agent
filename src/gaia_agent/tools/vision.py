@@ -1,229 +1,242 @@
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
 
-from gaia_agent.planner.plan_schema import PlanStep, StepType
-from gaia_agent.reliability.exception import ToolArgumentError
+from smolagents import Tool
+
+from gaia_agent.llm.service import LLMService
+from gaia_agent.planner.tool_spec import (
+    ToolCapability,
+    ToolErrorCode,
+    ToolModality,
+    ToolSpec,
+)
+from gaia_agent.tools.path_utils import (
+    is_placeholder_path,
+    resolve_file,
+)
 
 
-class ToolContractError(ValueError):
+SUPPORTED_IMAGE_EXTENSIONS = frozenset(
+    {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".bmp",
+        ".gif",
+    }
+)
+
+
+class AnalyzeImageTool(Tool):
+    name = "analyze_image"
+
+    description = (
+        "Analyze an image, chart, chess board, or diagram "
+        "and answer a question using only the visual "
+        "information contained in the image."
+    )
+
+    inputs = {
+        "image_path": {
+            "type": "string",
+            "description": (
+                "Path to the image relative to the allowed "
+                "base directory or filename."
+            ),
+        },
+        "question": {
+            "type": "string",
+            "description": (
+                "Question that should be answered using "
+                "the image."
+            ),
+        },
+    }
+
+    output_type = "string"
+
     def __init__(
         self,
-        message: str,
-        *,
-        tool_name: str | None = None,
-        argument_name: str | None = None,
-        details: dict[str, Any] | None = None,
+        llm_service: LLMService,
+        base_dir: str = ".",
     ) -> None:
-        super().__init__(message)
-        self.tool_name = tool_name
-        self.argument_name = argument_name
-        self.details = details or {}
+        super().__init__()
 
-
-class ToolContractValidator:
-    @staticmethod
-    def validate_step_contract(
-        step: PlanStep,
-        available_tools: dict[str, Any],
-    ) -> dict[str, Any]:
-        if not isinstance(step, PlanStep):
-            raise ToolContractError(
-                "Step must be a PlanStep instance.",
-                details={
-                    "received_type": type(step).__name__,
-                },
+        if llm_service is None:
+            raise ValueError(
+                "AnalyzeImageTool requires an LLMService."
             )
 
-        if step.step_type != StepType.TOOL:
-            return {}
+        self.llm_service = llm_service
+        self.base_dir = Path(base_dir).resolve()
 
-        if not step.tool_name:
-            raise ToolContractError(
-                "Tool step does not specify a tool_name.",
-                details={
-                    "step_id": step.step_id,
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            arguments_schema={
+                "type": "object",
+                "properties": {
+                    "image_path": {
+                        "type": "string",
+                        "description": (
+                            "Path to the image relative to "
+                            "the allowed base directory or "
+                            "filename."
+                        ),
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": (
+                            "Question that should be answered "
+                            "using the image."
+                        ),
+                    },
                 },
-            )
-
-        if not isinstance(available_tools, dict):
-            raise ToolContractError(
-                "available_tools must be a dict of name -> contract.",
-                details={
-                    "received_type": type(available_tools).__name__,
-                },
-            )
-
-        spec = available_tools.get(step.tool_name)
-
-        if spec is None:
-            raise ToolContractError(
-                f"Tool '{step.tool_name}' is not registered. "
-                f"Registered tools: {sorted(available_tools)}.",
-                tool_name=step.tool_name,
-                details={
-                    "available_tools": sorted(available_tools),
-                    "step_id": step.step_id,
-                },
-            )
-
-        return ToolContractValidator.validate_arguments(
-            spec=spec,
-            arguments=step.arguments or {},
+                "required": [
+                    "image_path",
+                    "question",
+                ],
+            },
+            capability=ToolCapability.READ_ONLY,
+            modalities=frozenset(
+                {ToolModality.VISION}
+            ),
+            result_schema={
+                "type": "string",
+            },
+            error_codes=frozenset(
+                {
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    ToolErrorCode.FILE_NOT_FOUND,
+                    ToolErrorCode.UNSUPPORTED_FORMAT,
+                    ToolErrorCode.EXECUTION_FAILED,
+                }
+            ),
+            allowed_imports=frozenset(),
+            function=self.forward,
         )
 
-    @staticmethod
-    def validate_arguments(
-        spec: Any,
-        arguments: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        tool_name = getattr(spec, "name", "?")
+    def forward(
+        self,
+        image_path: str,
+        question: str,
+    ) -> str:
+        try:
+            if (
+                not isinstance(image_path, str)
+                or not image_path.strip()
+            ):
+                return (
+                    "Error: image_path must be a "
+                    "non-empty string."
+                )
 
-        if arguments is None:
-            arguments = {}
+            if (
+                not isinstance(question, str)
+                or not question.strip()
+            ):
+                return (
+                    "Error: question must be a "
+                    "non-empty string."
+                )
 
-        if not isinstance(arguments, dict):
-            raise ToolArgumentError(
-                f"Tool '{tool_name}' received non-dict arguments: "
-                f"{type(arguments).__name__}."
+            if is_placeholder_path(image_path):
+                return (
+                    f"Error: Image path '{image_path}' "
+                    "is a placeholder or invalid."
+                )
+
+            path = resolve_file(
+                self.base_dir,
+                image_path,
             )
 
-        schema = ToolContractValidator._resolve_schema(spec)
-        args = dict(arguments)
+            if path is None:
+                return (
+                    f"Error: Image '{image_path}' was not "
+                    "found in the allowed search locations."
+                )
 
-        unknown = sorted(set(args) - set(schema))
+            if not path.exists():
+                return (
+                    f"Error: Image '{image_path}' does not exist."
+                )
 
-        if unknown:
-            raise ToolArgumentError(
-                f"Tool '{tool_name}' does not accept argument(s): "
-                f"{unknown}. "
-                f"Allowed arguments: {sorted(schema)}."
+            if not path.is_file():
+                return (
+                    f"Error: '{image_path}' is not a file."
+                )
+
+            extension = path.suffix.lower()
+
+            if extension not in SUPPORTED_IMAGE_EXTENSIONS:
+                return (
+                    f"Error: Unsupported image format "
+                    f"'{extension}'. Supported formats: "
+                    f"{', '.join(sorted(SUPPORTED_IMAGE_EXTENSIONS))}."
+                )
+
+            prompt = (
+                "You are solving a GAIA benchmark task using "
+                "a visual input.\n\n"
+                "Analyze the provided image carefully.\n"
+                "Use ONLY information that is actually visible "
+                "in the image.\n"
+                "Do not invent missing information.\n"
+                "If the question requires reading text, numbers, "
+                "labels, a chart, a chess position, or a diagram, "
+                "inspect the image carefully before answering.\n\n"
+                f"Question:\n{question}\n\n"
+                "Return the most precise answer possible."
             )
 
-        for name, meta in schema.items():
-            if ToolContractValidator._is_required(name, meta):
-                if name not in args or args[name] is None:
-                    raise ToolArgumentError(
-                        f"Tool '{tool_name}' requires argument '{name}'."
-                    )
-
-        for name, value in args.items():
-            ToolContractValidator._validate_type(
-                tool_name=tool_name,
-                arg_name=name,
-                value=value,
-                meta=schema[name],
+            response = self.llm_service.generate_image_sync(
+                image_path=path,
+                question=prompt,
+                operation="llm.vision",
             )
 
-        return args
+            answer = str(response).strip()
 
-    @staticmethod
-    def _resolve_schema(spec: Any) -> dict[str, Any]:
-        tool_name = getattr(spec, "name", "?")
-        schema = getattr(spec, "arguments_schema", None) or {}
+            if not answer:
+                return (
+                    "Error: Vision model returned an empty "
+                    "response."
+                )
 
-        if not isinstance(schema, dict):
-            raise ToolContractError(
-                f"Tool '{tool_name}' has an invalid arguments_schema.",
-                tool_name=tool_name,
-                details={
-                    "schema_type": type(schema).__name__,
-                },
+            return answer
+
+        except FileNotFoundError as exc:
+            return f"Error: {exc}"
+        except Exception as exc:
+            return (
+                "Error analyzing image: "
+                f"{type(exc).__name__}: {exc}"
             )
 
-        if "properties" in schema and isinstance(
-            schema["properties"],
-            dict,
-        ):
-            properties = schema["properties"]
-            required = set(schema.get("required", []) or [])
 
-            normalized: dict[str, Any] = {}
-
-            for name, meta in properties.items():
-                item = dict(meta or {})
-                item["_required"] = name in required
-                normalized[name] = item
-
-            return normalized
-
-        return dict(schema)
-
-    @staticmethod
-    def _is_required(
-        name: str,
-        meta: Any,
-    ) -> bool:
-        if not isinstance(meta, dict):
-            return True
-
-        if "_required" in meta:
-            return bool(meta["_required"])
-
-        if "optional" in meta:
-            return not bool(meta["optional"])
-
-        if "default" in meta:
-            return False
-
-        return True
-
-    @staticmethod
-    def _validate_type(
-        *,
-        tool_name: str,
-        arg_name: str,
-        value: Any,
-        meta: Any,
+class VisionTools:
+    def __init__(
+        self,
+        llm_service: LLMService,
+        base_dir: str = ".",
     ) -> None:
-        if not isinstance(meta, dict):
-            return
-
-        value_type = str(
-            meta.get("type", "string")
-        ).lower()
-
-        if value_type in {"any", "null"}:
-            return
-
-        if value is None:
-            return
-
-        if value_type in {"integer", "int"}:
-            valid = isinstance(value, int) and not isinstance(value, bool)
-
-        elif value_type in {"number", "float"}:
-            valid = (
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
+        if llm_service is None:
+            raise ValueError(
+                "VisionTools requires an LLMService."
             )
 
-        elif value_type in {"string", "str"}:
-            valid = isinstance(value, str)
+        self.llm_service = llm_service
+        self.base_dir = Path(base_dir).resolve()
 
-        elif value_type in {"boolean", "bool"}:
-            valid = isinstance(value, bool)
-
-        elif value_type in {"array", "list"}:
-            valid = isinstance(value, (list, tuple))
-
-        elif value_type in {"object", "dict"}:
-            valid = isinstance(value, dict)
-
-        else:
-            raise ToolContractError(
-                f"Tool '{tool_name}' argument '{arg_name}' "
-                f"uses unsupported schema type '{value_type}'.",
-                tool_name=tool_name,
-                argument_name=arg_name,
-                details={
-                    "schema_type": value_type,
-                },
+    def get_tools(self) -> list[Tool]:
+        return [
+            AnalyzeImageTool(
+                llm_service=self.llm_service,
+                base_dir=str(self.base_dir),
             )
-
-        if not valid:
-            raise ToolArgumentError(
-                f"Tool '{tool_name}' argument '{arg_name}' "
-                f"must be of type {value_type}, "
-                f"got {type(value).__name__}."
-            )
+        ]

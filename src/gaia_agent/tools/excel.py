@@ -7,25 +7,34 @@ from openpyxl import load_workbook
 from smolagents import Tool
 
 from gaia_agent.llm.service import LLMService
+from gaia_agent.planner.tool_spec import (
+    ToolCapability,
+    ToolErrorCode,
+    ToolModality,
+    ToolSpec,
+)
 from gaia_agent.tools.path_utils import (
     is_placeholder_path,
     resolve_file,
 )
 
 
-EXCEL_EXTENSIONS = {
-    ".xlsx",
-    ".xlsm",
-}
+EXCEL_EXTENSIONS = frozenset(
+    {
+        ".xlsx",
+        ".xlsm",
+    }
+)
 
-DELIMITED_EXTENSIONS = {
-    ".csv",
-    ".tsv",
-}
+DELIMITED_EXTENSIONS = frozenset(
+    {
+        ".csv",
+        ".tsv",
+    }
+)
 
 
 class AnalyzeExcelTool(Tool):
-
     name = "analyze_excel"
 
     description = (
@@ -71,6 +80,55 @@ class AnalyzeExcelTool(Tool):
 
         self.llm_service = llm_service
         self.base_dir = Path(base_dir).resolve()
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            arguments_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": (
+                            "Path to the spreadsheet relative "
+                            "to the allowed base directory "
+                            "or filename."
+                        ),
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": (
+                            "Question that should be answered "
+                            "using the spreadsheet data."
+                        ),
+                    },
+                },
+                "required": [
+                    "file_path",
+                    "question",
+                ],
+                "additionalProperties": False,
+            },
+            capability=ToolCapability.READ_ONLY,
+            modalities=frozenset(
+                {ToolModality.EXCEL}
+            ),
+            result_schema={
+                "type": "string",
+            },
+            error_codes=frozenset(
+                {
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    ToolErrorCode.FILE_NOT_FOUND,
+                    ToolErrorCode.UNSUPPORTED_FORMAT,
+                    ToolErrorCode.EXECUTION_FAILED,
+                }
+            ),
+            allowed_imports=frozenset(),
+            function=self.forward,
+        )
 
     def _read_excel(
         self,
@@ -288,7 +346,9 @@ class AnalyzeExcelTool(Tool):
                     f"Error: '{file_path}' is not a file."
                 )
 
-            spreadsheet_data = self._read_spreadsheet(path)
+            spreadsheet_data = self._read_spreadsheet(
+                path
+            )
 
             if not spreadsheet_data.strip():
                 return (
@@ -338,7 +398,6 @@ class AnalyzeExcelTool(Tool):
 
 
 class ExcelTools:
-
     def __init__(
         self,
         llm_service: LLMService,
@@ -359,3 +418,4 @@ class ExcelTools:
                 base_dir=str(self.base_dir),
             )
         ]
+    
