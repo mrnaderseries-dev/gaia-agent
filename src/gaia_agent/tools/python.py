@@ -18,7 +18,6 @@ from gaia_agent.reliability.exception import (
     ToolExecutionError,
 )
 
-
 ALLOWED_IMPORTS: dict[str, str] = {
     "math": "math",
     "json": "json",
@@ -61,27 +60,37 @@ class PythonInterpreterTool(Tool):
         self.spec = ToolSpec(
             name=self.name,
             description=self.description,
-            arguments_schema=dict(
-                self.inputs
-            ),
+            arguments_schema={
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": (
+                            "Valid Python code to execute. "
+                            "Assign the final answer to 'result'."
+                        ),
+                    }
+                },
+                "required": ["code"],
+                "additionalProperties": False,
+            },
             capability=ToolCapability.COMPUTATION,
-            modalities=frozenset({
-                ToolModality.CODE,
-                ToolModality.TEXT,
-            }),
+            modalities=frozenset(
+                {
+                    ToolModality.TEXT,
+                }
+            ),
             result_schema={
                 "type": self.output_type,
             },
-            error_codes=frozenset({
-                ToolErrorCode.SYNTAX_ERROR,
-                ToolErrorCode.IMPORT_ERROR,
-                ToolErrorCode.EXECUTION_ERROR,
-            }),
-            allowed_imports=tuple(
-                sorted(
-                    ALLOWED_IMPORTS
-                )
+            error_codes=frozenset(
+                {
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    ToolErrorCode.PERMISSION_DENIED,
+                    ToolErrorCode.EXECUTION_FAILED,
+                }
             ),
+            allowed_imports=frozenset(ALLOWED_IMPORTS),
             function=self.forward,
         )
 
@@ -117,6 +126,11 @@ class PythonInterpreterTool(Tool):
         self,
         code: str,
     ) -> str:
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError(
+                "Python code must be a non-empty string."
+            )
+
         try:
             compile(
                 code,
@@ -160,13 +174,9 @@ class PythonInterpreterTool(Tool):
             }
         }
 
-        for alias, module_name in (
-            ALLOWED_IMPORTS.items()
-        ):
+        for alias, module_name in ALLOWED_IMPORTS.items():
             try:
-                global_vars[alias] = __import__(
-                    module_name
-                )
+                global_vars[alias] = __import__(module_name)
             except ImportError:
                 pass
 
@@ -184,15 +194,12 @@ class PythonInterpreterTool(Tool):
         except NameError as exc:
             raise ToolExecutionError(
                 f"Undefined name: {exc}. "
-                "Use registered tools as separate "
-                "tool steps."
+                "Use registered tools as separate tool steps."
             ) from None
         finally:
             sys.stdout = old_stdout
 
-        printed_output = (
-            redirected_output.getvalue()
-        )
+        printed_output = redirected_output.getvalue()
 
         if "result" in local_vars:
             result = local_vars["result"]
@@ -226,9 +233,7 @@ class PythonInterpreterTool(Tool):
 
 
 class PythonTools:
-    def get_tools(
-        self,
-    ) -> list[Tool]:
+    def get_tools(self) -> list[Tool]:
         return [
             PythonInterpreterTool()
         ]

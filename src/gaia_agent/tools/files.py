@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from smolagents import Tool
 
@@ -43,29 +42,45 @@ class FileReaderTool(Tool):
     ) -> None:
         super().__init__()
 
-        self.base_dir = Path(
-            base_dir
-        ).resolve()
+        self.base_dir = Path(base_dir).resolve()
 
         self.spec = ToolSpec(
             name=self.name,
             description=self.description,
-            arguments_schema=dict(
-                self.inputs
-            ),
+            arguments_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": (
+                            "Path to the target file relative "
+                            "to the allowed base directory "
+                            "or filename."
+                        ),
+                    }
+                },
+                "required": ["file_path"],
+                "additionalProperties": False,
+            },
             capability=ToolCapability.READ_ONLY,
-            modalities=frozenset({
-                ToolModality.FILE,
-                ToolModality.TEXT,
-            }),
+            modalities=frozenset(
+                {
+                    ToolModality.FILE,
+                    ToolModality.TEXT,
+                }
+            ),
             result_schema={
                 "type": self.output_type,
             },
-            error_codes=frozenset({
-                ToolErrorCode.FILE_NOT_FOUND,
-                ToolErrorCode.INVALID_FILE,
-                ToolErrorCode.DECODE_ERROR,
-            }),
+            error_codes=frozenset(
+                {
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    ToolErrorCode.FILE_NOT_FOUND,
+                    ToolErrorCode.INVALID_FILE,
+                    ToolErrorCode.DECODE_ERROR,
+                }
+            ),
+            allowed_imports=frozenset(),
             function=self.forward,
         )
 
@@ -74,9 +89,18 @@ class FileReaderTool(Tool):
         file_path: str,
     ) -> str:
         try:
+            if (
+                not isinstance(file_path, str)
+                or not file_path.strip()
+            ):
+                return (
+                    "Error: file_path must be "
+                    "a non-empty string."
+                )
+
             if is_placeholder_path(file_path):
                 return (
-                    f"Error: File path '{file_path}' is "
+                    f"Error: File '{file_path}' is "
                     "a placeholder or invalid."
                 )
 
@@ -110,7 +134,9 @@ class FileReaderTool(Tool):
                         encoding=encoding,
                     ) as handle:
                         content = handle.read()
+
                     break
+
                 except UnicodeDecodeError:
                     continue
 
@@ -134,15 +160,11 @@ class FileTools:
         self,
         base_dir: str = ".",
     ) -> None:
-        self.base_dir = Path(
-            base_dir
-        ).resolve()
+        self.base_dir = Path(base_dir).resolve()
 
     def get_tools(self) -> list[Tool]:
         return [
             FileReaderTool(
-                base_dir=str(
-                    self.base_dir
-                ),
+                base_dir=str(self.base_dir)
             )
         ]

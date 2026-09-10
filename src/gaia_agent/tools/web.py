@@ -29,19 +29,29 @@ class SafeDuckDuckGoSearch:
         self.spec = ToolSpec(
             name=self.name,
             description=self.description,
-            arguments_schema=dict(self.inputs),
+            arguments_schema={
+                "type": "object",
+                "properties": dict(self.inputs),
+                "required": ["query"],
+                "additionalProperties": False,
+            },
             capability=ToolCapability.NETWORK_READ,
-            modalities=frozenset({
-                ToolModality.TEXT,
-            }),
+            modalities=frozenset(
+                {
+                    ToolModality.TEXT,
+                }
+            ),
             result_schema={
                 "type": self.output_type,
             },
-            error_codes=frozenset({
-                ToolErrorCode.NETWORK_ERROR,
-                ToolErrorCode.RATE_LIMITED,
-                ToolErrorCode.TIMEOUT,
-            }),
+            error_codes=frozenset(
+                {
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    ToolErrorCode.NETWORK_ERROR,
+                    ToolErrorCode.RATE_LIMITED,
+                    ToolErrorCode.TIMEOUT,
+                }
+            ),
             allowed_imports=frozenset(),
             function=self,
         )
@@ -80,20 +90,30 @@ class SafeVisitWebpage:
         self.spec = ToolSpec(
             name=self.name,
             description=self.description,
-            arguments_schema=dict(self.inputs),
+            arguments_schema={
+                "type": "object",
+                "properties": dict(self.inputs),
+                "required": ["url"],
+                "additionalProperties": False,
+            },
             capability=ToolCapability.NETWORK_READ,
-            modalities=frozenset({
-                ToolModality.TEXT,
-            }),
+            modalities=frozenset(
+                {
+                    ToolModality.TEXT,
+                }
+            ),
             result_schema={
                 "type": self.output_type,
             },
-            error_codes=frozenset({
-                ToolErrorCode.NETWORK_ERROR,
-                ToolErrorCode.RATE_LIMITED,
-                ToolErrorCode.TIMEOUT,
-                ToolErrorCode.NOT_FOUND,
-            }),
+            error_codes=frozenset(
+                {
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    ToolErrorCode.NETWORK_ERROR,
+                    ToolErrorCode.RATE_LIMITED,
+                    ToolErrorCode.TIMEOUT,
+                    ToolErrorCode.NOT_FOUND,
+                }
+            ),
             allowed_imports=frozenset(),
             function=self,
         )
@@ -118,24 +138,49 @@ class SafeYoutubeTranscript:
         self.inputs = self._tool.inputs
         self.output_type = self._tool.output_type
 
+        properties = dict(self.inputs)
+
+        required = [
+            name
+            for name in (
+                "video_url",
+                "url",
+                "youtube_url",
+            )
+            if name in properties
+        ]
+
+        if not required and properties:
+            required = [next(iter(properties))]
+
         self.spec = ToolSpec(
             name=self.name,
             description=self.description,
-            arguments_schema=dict(self.inputs),
+            arguments_schema={
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
             capability=ToolCapability.NETWORK_READ,
-            modalities=frozenset({
-                ToolModality.VIDEO,
-                ToolModality.TEXT,
-            }),
+            modalities=frozenset(
+                {
+                    ToolModality.VIDEO,
+                    ToolModality.TEXT,
+                }
+            ),
             result_schema={
                 "type": self.output_type,
             },
-            error_codes=frozenset({
-                ToolErrorCode.NOT_FOUND,
-                ToolErrorCode.NETWORK_ERROR,
-                ToolErrorCode.RATE_LIMITED,
-                ToolErrorCode.TIMEOUT,
-            }),
+            error_codes=frozenset(
+                {
+                    ToolErrorCode.INVALID_ARGUMENT,
+                    ToolErrorCode.NOT_FOUND,
+                    ToolErrorCode.NETWORK_ERROR,
+                    ToolErrorCode.RATE_LIMITED,
+                    ToolErrorCode.TIMEOUT,
+                }
+            ),
             allowed_imports=frozenset(),
             function=self,
         )

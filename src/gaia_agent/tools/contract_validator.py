@@ -11,7 +11,7 @@ class ToolContractValidator:
     def validate_step_contract(
         step: PlanStep,
         available_tools: Mapping[str, ToolSpec],
-    ) -> None:
+    ) -> dict[str, Any]:
         if step.tool_name not in available_tools:
             raise ValueError(
                 f"Unknown tool: {step.tool_name}"
@@ -19,20 +19,23 @@ class ToolContractValidator:
 
         spec = available_tools[step.tool_name]
 
-        ToolContractValidator.validate_arguments(
+        return ToolContractValidator.validate_arguments(
             spec=spec,
-            arguments=step.tool_args or {},
+            arguments=step.arguments or {},
         )
 
     @staticmethod
     def validate_arguments(
         spec: ToolSpec,
-        arguments: Mapping[str, Any],
+        arguments: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         if not isinstance(spec, ToolSpec):
             raise TypeError(
                 "spec must be a ToolSpec"
             )
+
+        if arguments is None:
+            arguments = {}
 
         if not isinstance(arguments, Mapping):
             raise TypeError(
@@ -40,6 +43,12 @@ class ToolContractValidator:
             )
 
         schema = spec.arguments_schema or {}
+
+        if schema.get("type") != "object":
+            raise ValueError(
+                f"Tool '{spec.name}' must define "
+                "an object arguments schema."
+            )
 
         properties = schema.get(
             "properties",
@@ -50,6 +59,12 @@ class ToolContractValidator:
             "required",
             [],
         )
+
+        if not isinstance(properties, Mapping):
+            raise TypeError(
+                f"Tool '{spec.name}' properties "
+                "must be a mapping."
+            )
 
         unknown_arguments = (
             set(arguments)
