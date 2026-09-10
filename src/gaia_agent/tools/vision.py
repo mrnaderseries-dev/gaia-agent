@@ -100,6 +100,7 @@ class AnalyzeImageTool(Tool):
                     "image_path",
                     "question",
                 ],
+                "additionalProperties": False,
             },
             capability=ToolCapability.READ_ONLY,
             modalities=frozenset(
