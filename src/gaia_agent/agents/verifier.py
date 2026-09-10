@@ -33,17 +33,43 @@ class VerificationInput(BaseModel):
     task_type: str | None = None
 
 
+class EvidenceItem(BaseModel):
+    tool_name: str
+    result: Any
+    artifact_id: str | None = None
+    source_type: str | None = None
+    succeeded: bool = True
+
+
 _STRONG_TOOL_NAMES = frozenset(
     {
         "python_interpreter",
         "analyze_excel",
         "file_reader",
         "analyze_image",
+        "audio_reader",
+        "transcribe_audio",
+        "video_reader",
+        "analyze_video",
+        "youtube_transcript",
     }
 )
 
+
 _NUMBER_RE = re.compile(
-    r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+    r"""
+    (?<![\w.])
+    -?
+    (?:
+        \d{1,3}(?:,\d{3})+
+        |
+        \d+
+    )
+    (?:\.\d+)?
+    (?:[eE][+-]?\d+)?
+    (?![\w.])
+    """,
+    re.VERBOSE,
 )
 
 
@@ -51,70 +77,94 @@ def _extract_numbers(text: str) -> list[float]:
     if not text:
         return []
 
-    cleaned = re.sub(
-        r"(?<=\d),(?=\d{3}(?!\d))",
-        "",
-        text,
-    )
+    matches = _NUMBER_RE.finditer(str(text))
+    numbers: list[float] = []
 
-    return [
-        float(match.group(0))
-        for match in _NUMBER_RE.finditer(cleaned)
-    ]
+    for match in matches:
+        value = match.group(0).replace(",", "")
+        try:
+            numbers.append(float(value))
+        except ValueError:
+            continue
+
+    return numbers
+
+
+def _normalize_text(text: str) -> str:
+    text = str(text)
+    text = text.casefold()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _get_field(
+    item: Any,
+    name: str,
+    default: Any = None,
+) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
 
 
 def _get_tool_name(item: Any) -> str | None:
-    if isinstance(item, dict):
-        value = item.get("tool_name")
-    else:
-        value = getattr(item, "tool_name", None)
-
+    value = _get_field(item, "tool_name")
     if value is None:
         return None
-
-    return str(value)
+    value = str(value).strip()
+    return value or None
 
 
 def _get_result(item: Any) -> Any:
-    if isinstance(item, dict):
-        return item.get("result")
-
-    return getattr(item, "result", None)
+    return _get_field(item, "result")
 
 
 def _get_succeeded(item: Any) -> bool:
-    if isinstance(item, dict):
-        return bool(item.get("succeeded", True))
+    return bool(_get_field(item, "succeeded", True))
 
-    return bool(getattr(item, "succeeded", True))
+
+def _get_artifact_id(item: Any) -> str | None:
+    value = _get_field(item, "artifact_id")
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _get_source_type(item: Any) -> str | None:
+    value = _get_field(item, "source_type")
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
 
 
 def _iter_successful_evidence(
     raw_data: list[Any],
-) -> list[tuple[str, Any]]:
-    evidence: list[tuple[str, Any]] = []
+) -> list[EvidenceItem]:
+    evidence: list[EvidenceItem] = []
 
     for item in raw_data or []:
         tool_name = _get_tool_name(item)
 
         if not tool_name:
             continue
-
-        if tool_name == "llm":
+        if tool_name.casefold() == "llm":
             continue
-
         if not _get_succeeded(item):
             continue
 
         result = _get_result(item)
-
         if result is None:
             continue
 
         evidence.append(
-            (
-                tool_name,
-                result,
+            EvidenceItem(
+                tool_name=tool_name,
+                result=result,
+                artifact_id=_get_artifact_id(item),
+                source_type=_get_source_type(item),
+                succeeded=True,
             )
         )
 
@@ -123,27 +173,55 @@ def _iter_successful_evidence(
 
 def _iter_strong_evidence(
     raw_data: list[Any],
-) -> list[tuple[str, Any]]:
+) -> list[EvidenceItem]:
+    evidence = _iter_successful_evidence(raw_data)
     return [
-        (tool_name, result)
-        for tool_name, result in _iter_successful_evidence(raw_data)
-        if tool_name in _STRONG_TOOL_NAMES
+        item
+        for item in evidence
+        if item.tool_name in _STRONG_TOOL_NAMES
     ]
 
 
-def _normalize_text(text: str) -> str:
-    return re.sub(
-        r"\s+",
-        " ",
-        str(text).casefold(),
-    ).strip()
+def _distinct_numbers(
+    numbers: list[float],
+) -> list[float]:
+    result: list[float] = []
+
+    for number in numbers:
+        if any(
+            abs(number - existing) < 1e-9
+            for existing in result
+        ):
+            continue
+        result.append(number)
+
+    return result
+
+
+def _candidate_is_single_number(
+    candidate: str,
+) -> tuple[bool, float | None]:
+    candidate = candidate.strip()
+    if not candidate:
+        return False, None
+
+    match = _NUMBER_RE.fullmatch(candidate)
+    if not match:
+        return False, None
+
+    try:
+        return (
+            True,
+            float(match.group(0).replace(",", "")),
+        )
+    except ValueError:
+        return False, None
 
 
 def _deterministic_verification(
     candidate_answer: str,
     raw_data: list[Any],
 ) -> tuple[VerificationStatus | None, str]:
-
     candidate = str(candidate_answer or "").strip()
 
     if not candidate:
@@ -160,28 +238,27 @@ def _deterministic_verification(
             "No strong deterministic evidence is available.",
         )
 
-    candidate_numbers = _extract_numbers(candidate)
+    is_numeric, candidate_value = _candidate_is_single_number(candidate)
 
-    if len(candidate_numbers) == 1:
-        candidate_value = candidate_numbers[0]
-
+    if is_numeric and candidate_value is not None:
         evidence_numbers: list[float] = []
 
-        for _, result in strong_evidence:
+        for evidence in strong_evidence:
             evidence_numbers.extend(
-                _extract_numbers(str(result))
+                _extract_numbers(str(evidence.result))
             )
 
         if not evidence_numbers:
             return (
                 None,
-                "Candidate is numeric but the evidence contains no "
-                "numeric value.",
+                (
+                    "The candidate is numeric, but the "
+                    "deterministic evidence contains no "
+                    "numeric value."
+                ),
             )
 
-        distinct_numbers = list(
-            dict.fromkeys(evidence_numbers)
-        )
+        distinct_numbers = _distinct_numbers(evidence_numbers)
 
         if len(distinct_numbers) == 1:
             evidence_value = distinct_numbers[0]
@@ -190,17 +267,18 @@ def _deterministic_verification(
                 return (
                     VerificationStatus.VERIFIED,
                     (
-                        "The candidate number matches the "
-                        "single numeric value found in "
-                        "deterministic evidence."
+                        "The candidate exactly matches the "
+                        "single distinct numeric value found "
+                        "in deterministic evidence."
                     ),
                 )
 
             return (
                 VerificationStatus.INVALID,
                 (
-                    "Deterministic evidence contradicts the "
-                    f"candidate: evidence={evidence_value:g}, "
+                    "Deterministic evidence contains a "
+                    "different numeric value: "
+                    f"evidence={evidence_value:g}, "
                     f"candidate={candidate_value:g}."
                 ),
             )
@@ -209,8 +287,9 @@ def _deterministic_verification(
             None,
             (
                 "Deterministic evidence contains multiple "
-                "numeric values, so numeric matching alone "
-                "cannot determine the answer."
+                "distinct numeric values. Numeric matching "
+                "alone cannot determine which value answers "
+                "the question."
             ),
         )
 
@@ -222,45 +301,76 @@ def _deterministic_verification(
             "Candidate answer is empty after normalization.",
         )
 
-    for _, result in strong_evidence:
-        normalized_result = _normalize_text(str(result))
-
-        if not normalized_result:
-            continue
-
-        if normalized_candidate in normalized_result:
-            return (
-                VerificationStatus.VERIFIED,
-                (
-                    "The candidate answer appears directly in "
-                    "deterministic evidence."
-                ),
-            )
-
     return (
         None,
-        "No deterministic textual match was found.",
+        (
+            "The candidate is textual and deterministic "
+            "substring matching is unsafe. Semantic evidence "
+            "verification is required."
+        ),
     )
 
 
+def _normalize_task_type(
+    task_type: str | None,
+) -> str:
+    if not task_type:
+        return ""
+    return str(task_type).strip().upper()
+
+
+def _check_source_support(
+    data: VerificationInput,
+) -> VerificationResult | None:
+    task_type = _normalize_task_type(data.task_type)
+    evidence = _iter_successful_evidence(data.raw_data)
+
+    tool_names = {item.tool_name for item in evidence}
+
+    if task_type in {"IMAGE", "VISION"}:
+        if "analyze_image" not in tool_names:
+            return VerificationResult(
+                status=VerificationStatus.UNSUPPORTED,
+                reason=(
+                    "The task requires image evidence, "
+                    "but no successful image-analysis "
+                    "evidence is available."
+                ),
+            )
+
+    if task_type == "AUDIO":
+        if not (
+            "audio_reader" in tool_names
+            or "transcribe_audio" in tool_names
+        ):
+            return VerificationResult(
+                status=VerificationStatus.UNSUPPORTED,
+                reason=(
+                    "The task requires audio evidence, "
+                    "but no successful audio evidence "
+                    "is available."
+                ),
+            )
+
+    if task_type == "VIDEO":
+        if not (
+            "video_reader" in tool_names
+            or "analyze_video" in tool_names
+            or "youtube_transcript" in tool_names
+        ):
+            return VerificationResult(
+                status=VerificationStatus.UNSUPPORTED,
+                reason=(
+                    "The task requires video evidence, "
+                    "but no successful video-related "
+                    "evidence is available."
+                ),
+            )
+
+    return None
+
+
 class VerifierAgent:
-    """
-    Strict final-answer verifier.
-
-    Responsibilities:
-        - evaluate candidate answers
-        - evaluate evidence
-        - distinguish verification failure types
-
-    Does NOT:
-        - execute tools
-        - generate replacement answers
-        - replan
-        - retry
-        - recover
-        - modify AgentState
-        - decide termination
-    """
 
     def __init__(
         self,
@@ -275,9 +385,7 @@ class VerifierAgent:
         self,
         data: VerificationInput,
     ) -> VerificationResult:
-        candidate = str(
-            data.candidate_answer or ""
-        ).strip()
+        candidate = str(data.candidate_answer or "").strip()
 
         if not candidate:
             return VerificationResult(
@@ -285,9 +393,7 @@ class VerifierAgent:
                 reason="Candidate answer is missing or empty.",
             )
 
-        evidence = _iter_successful_evidence(
-            data.raw_data
-        )
+        evidence = _iter_successful_evidence(data.raw_data)
 
         if not evidence:
             return VerificationResult(
@@ -298,10 +404,7 @@ class VerifierAgent:
                 ),
             )
 
-        unsupported = self._check_source_support(
-            data
-        )
-
+        unsupported = _check_source_support(data)
         if unsupported is not None:
             return unsupported
 
@@ -336,78 +439,16 @@ class VerifierAgent:
         return self._validate_llm_result(result)
 
     @staticmethod
-    def _check_source_support(
-        data: VerificationInput,
-    ) -> VerificationResult | None:
-        task_type = (
-            str(data.task_type or "")
-            .strip()
-            .upper()
-        )
-
-        tool_names = {
-            tool_name
-            for tool_name, _ in _iter_successful_evidence(
-                data.raw_data
-            )
-        }
-
-        if task_type in {"IMAGE", "VISION"}:
-            if "analyze_image" not in tool_names:
-                return VerificationResult(
-                    status=VerificationStatus.UNSUPPORTED,
-                    reason=(
-                        "The task requires image evidence, "
-                        "but no successful image-analysis "
-                        "evidence is available."
-                    ),
-                )
-
-        if task_type in {"AUDIO"}:
-            if not (
-                "audio_reader" in tool_names
-                or "transcribe_audio" in tool_names
-            ):
-                return VerificationResult(
-                    status=VerificationStatus.UNSUPPORTED,
-                    reason=(
-                        "The task requires audio evidence, "
-                        "but no successful audio evidence "
-                        "is available."
-                    ),
-                )
-
-        if task_type in {"VIDEO"}:
-            if not (
-                "video_reader" in tool_names
-                or "analyze_video" in tool_names
-                or "youtube_transcript" in tool_names
-            ):
-                return VerificationResult(
-                    status=VerificationStatus.UNSUPPORTED,
-                    reason=(
-                        "The task requires video evidence, "
-                        "but no successful video-related "
-                        "evidence is available."
-                    ),
-                )
-
-        return None
-
-    @staticmethod
     def _validate_llm_result(
         result: VerificationResult,
     ) -> VerificationResult:
-        """
-        Apply safety rules to the semantic verifier result.
-        """
-
         if result.status == VerificationStatus.VERIFIED:
             return VerificationResult(
                 status=VerificationStatus.VERIFIED,
                 reason=(
-                    "Candidate was semantically verified against "
-                    f"the available evidence: {result.reason}"
+                    "Candidate was semantically verified "
+                    "against the available evidence: "
+                    f"{result.reason}"
                 ),
             )
 
@@ -415,7 +456,8 @@ class VerifierAgent:
             return VerificationResult(
                 status=VerificationStatus.INVALID,
                 reason=(
-                    "The evidence does not support the candidate: "
+                    "The evidence contradicts or fails to "
+                    "support the candidate: "
                     f"{result.reason}"
                 ),
             )
@@ -424,8 +466,9 @@ class VerifierAgent:
             return VerificationResult(
                 status=VerificationStatus.CONFLICTING_EVIDENCE,
                 reason=(
-                    "The available evidence contains conflicting "
-                    f"information: {result.reason}"
+                    "The available evidence contains "
+                    "materially conflicting information: "
+                    f"{result.reason}"
                 ),
             )
 
@@ -433,16 +476,19 @@ class VerifierAgent:
             return VerificationResult(
                 status=VerificationStatus.UNSUPPORTED,
                 reason=(
-                    "The available evidence does not support "
-                    f"verification of this task: {result.reason}"
+                    "The available evidence does not "
+                    "represent the source or modality "
+                    "required for verification: "
+                    f"{result.reason}"
                 ),
             )
 
         return VerificationResult(
             status=VerificationStatus.INSUFFICIENT_EVIDENCE,
             reason=(
-                "The available evidence is insufficient to "
-                f"verify the candidate: {result.reason}"
+                "The available evidence is insufficient "
+                "to verify the candidate: "
+                f"{result.reason}"
             ),
         )
 
@@ -463,106 +509,135 @@ class VerifierAgent:
 
     @staticmethod
     def _system_prompt() -> str:
-        return (
-            "You are a strict factual answer verification agent.\n\n"
-            "Your ONLY task is to determine whether the candidate "
-            "answer is supported by the provided evidence.\n\n"
-            "CRITICAL RULES:\n"
-            "1. Evaluate the evidence against the EXACT question.\n"
-            "2. The evidence must actually support the answer "
-            "to the question.\n"
-            "3. The mere presence of the candidate value in "
-            "the evidence is NOT sufficient.\n"
-            "4. Do not use outside knowledge.\n"
-            "5. Do not invent missing evidence.\n"
-            "6. Do not rewrite the candidate answer.\n"
-            "7. If the evidence contradicts the candidate, "
-            "return INVALID.\n"
-            "8. If two or more pieces of evidence contradict "
-            "each other in a material way, return "
-            "CONFLICTING_EVIDENCE.\n"
-            "9. If the evidence is relevant but insufficient "
-            "to establish the answer, return "
-            "INSUFFICIENT_EVIDENCE.\n"
-            "10. If the required source/modality is not actually "
-            "represented by the evidence, return UNSUPPORTED.\n"
-            "11. Return VERIFIED only when the evidence provides "
-            "a direct and reasonable factual basis for the "
-            "candidate answer.\n"
-            "12. For web evidence, verify semantic relevance "
-            "to the exact question. Matching words or numbers "
-            "alone are not sufficient.\n"
-            "13. For files, images, audio, and video, verify "
-            "that the evidence corresponds to the requested "
-            "source.\n"
-            "14. When uncertain, do NOT guess. Prefer "
-            "INSUFFICIENT_EVIDENCE.\n\n"
-            "Return only the structured verification result."
-        )
+        return """
+You are a strict factual answer verification agent.
+
+Your ONLY responsibility is to determine whether the
+candidate answer is supported by the provided evidence.
+
+You are NOT an answer generator.
+You are NOT allowed to solve the task independently.
+You are NOT allowed to use outside knowledge.
+You must reason only from the supplied QUESTION,
+CANDIDATE ANSWER, TASK TYPE, and EVIDENCE.
+
+CRITICAL RULES:
+1. Evaluate the evidence against the EXACT question.
+2. The evidence must actually answer or support the question being asked.
+3. The mere presence of the candidate text, number, name, or value inside evidence is NOT sufficient.
+4. Never use outside knowledge.
+5. Never invent missing evidence.
+6. Never generate a replacement answer.
+7. If the evidence explicitly contradicts the candidate, return INVALID.
+8. If relevant evidence contains material contradictions between sources, return CONFLICTING_EVIDENCE.
+9. If evidence is relevant but does not establish the candidate with sufficient confidence, return INSUFFICIENT_EVIDENCE.
+10. If the required source or modality is not represented by the evidence, return UNSUPPORTED.
+11. Return VERIFIED only when the evidence provides a direct and reasonable factual basis for the candidate.
+12. For web evidence, verify semantic relevance to the exact question. Matching words, numbers, titles, or names alone are not sufficient.
+13. For files, images, audio, and video, verify that the evidence actually corresponds to the requested source.
+14. Do not infer that a source supports the candidate merely because the candidate appears somewhere in the source.
+15. Pay attention to negation.
+16. Pay attention to temporal context.
+17. Pay attention to relationships between values and entities.
+18. When multiple numbers occur in evidence, do not assume that the candidate is correct merely because its number appears in the evidence.
+19. When uncertain, prefer INSUFFICIENT_EVIDENCE.
+20. The evidence is the only source of truth available to you.
+
+Return ONLY the structured VerificationResult.
+""".strip()
 
     @staticmethod
+    def _format_evidence(
+        evidence: list[EvidenceItem],
+    ) -> str:
+        if not evidence:
+            return "(No successful evidence was provided.)"
+
+        chunks: list[str] = []
+
+        for index, item in enumerate(evidence, start=1):
+            metadata: list[str] = [f"source_tool={item.tool_name}"]
+
+            if item.source_type:
+                metadata.append(f"source_type={item.source_type}")
+
+            if item.artifact_id:
+                metadata.append(f"artifact_id={item.artifact_id}")
+
+            metadata_text = ", ".join(metadata)
+
+            chunks.append(
+                f"Evidence {index} ({metadata_text}):\n{item.result}"
+            )
+
+        return "\n\n".join(chunks)
+
     def _build_prompt(
+        self,
         data: VerificationInput,
     ) -> str:
-        evidence_items = _iter_successful_evidence(
-            data.raw_data
-        )
+        evidence = _iter_successful_evidence(data.raw_data)
+        evidence_text = self._format_evidence(evidence)
 
-        if not evidence_items:
-            evidence_text = (
-                "(No successful evidence was provided.)"
-            )
-        else:
-            chunks: list[str] = []
+        return f"""
+Verify the candidate answer using ONLY the provided evidence.
 
-            for index, (tool_name, result) in enumerate(
-                evidence_items,
-                start=1,
-            ):
-                chunks.append(
-                    f"Evidence {index} "
-                    f"(source tool: {tool_name}):\n"
-                    f"{result}"
-                )
+QUESTION:
+{data.question}
 
-            evidence_text = "\n\n".join(chunks)
+TASK TYPE:
+{data.task_type or "unknown"}
 
-        return (
-            "Verify the following candidate answer.\n\n"
-            f"QUESTION:\n{data.question}\n\n"
-            f"TASK TYPE:\n{data.task_type or 'unknown'}\n\n"
-            f"CANDIDATE ANSWER:\n{data.candidate_answer}\n\n"
-            "EVIDENCE:\n"
-            f"{evidence_text}\n\n"
-            "Choose exactly one status:\n"
-            "- VERIFIED: evidence directly supports the answer.\n"
-            "- INVALID: evidence contradicts the answer.\n"
-            "- INSUFFICIENT_EVIDENCE: evidence is relevant but "
-            "not sufficient to establish the answer.\n"
-            "- CONFLICTING_EVIDENCE: relevant evidence materially "
-            "contradicts other relevant evidence.\n"
-            "- UNSUPPORTED: the evidence does not represent the "
-            "source or modality required by the question.\n\n"
-            "Do not use outside knowledge.\n"
-            "Do not guess.\n"
-            "Return a concise reason."
-        )
+CANDIDATE ANSWER:
+{data.candidate_answer}
+
+EVIDENCE:
+{evidence_text}
+
+Your decision must be based on whether the evidence actually
+supports the candidate answer to the exact question.
+
+Choose exactly ONE status:
+
+VERIFIED
+The evidence directly and sufficiently supports the candidate.
+
+INVALID
+The evidence contradicts the candidate.
+
+INSUFFICIENT_EVIDENCE
+The evidence is relevant but insufficient to establish whether
+the candidate is correct.
+
+CONFLICTING_EVIDENCE
+Two or more relevant evidence sources materially contradict
+each other.
+
+UNSUPPORTED
+The required source or modality is not represented by the
+available evidence.
+
+IMPORTANT:
+- Do not use outside knowledge.
+- Do not guess.
+- Do not solve the question independently.
+- Do not treat a matching number or string as sufficient.
+- Check relationships, context, entity, time, and negation.
+- If uncertain, return INSUFFICIENT_EVIDENCE.
+
+Return a concise reason.
+""".strip()
 
     @staticmethod
     def _format_raw_item(
         item: Any,
     ) -> str:
-      
-
         if item is None:
             return "None"
-
         if isinstance(item, str):
             return item
-
         if isinstance(item, BaseModel):
             return item.model_dump_json(indent=2)
-
         if isinstance(item, (dict, list, tuple, set)):
             try:
                 return json.dumps(
