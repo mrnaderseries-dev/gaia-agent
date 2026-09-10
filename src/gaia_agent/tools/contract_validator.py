@@ -1,344 +1,172 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
-from gaia_agent.planner.plan_schema import (
-    PlanStep,
-    StepType,
-)
-from gaia_agent.planner.tool_spec import (
-    ToolCapability,
-    ToolModality,
-    ToolSpec,
-)
-from gaia_agent.reliability.exception import (
-    ToolArgumentError,
-)
-
-
-class ToolContractError(ValueError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        tool_name: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.tool_name = tool_name
-        self.details = details or {}
+from gaia_agent.planner.plan_schema import PlanStep
+from gaia_agent.planner.tool_spec import ToolSpec
 
 
 class ToolContractValidator:
     @staticmethod
     def validate_step_contract(
         step: PlanStep,
-        available_tools: dict[str, ToolSpec],
-    ) -> dict[str, Any]:
-        if not isinstance(
-            step,
-            PlanStep,
-        ):
-            raise ToolContractError(
-                "Step must be a PlanStep instance."
+        available_tools: Mapping[str, ToolSpec],
+    ) -> None:
+        if step.tool_name not in available_tools:
+            raise ValueError(
+                f"Unknown tool: {step.tool_name}"
             )
 
-        if step.step_type != StepType.TOOL:
-            return {}
+        spec = available_tools[step.tool_name]
 
-        if not step.tool_name:
-            raise ToolContractError(
-                "Tool step does not specify a tool_name."
-            )
-
-        spec = available_tools.get(
-            step.tool_name
-        )
-
-        if spec is None:
-            raise ToolContractError(
-                f"Tool '{step.tool_name}' is not registered.",
-                tool_name=step.tool_name,
-            )
-
-        return ToolContractValidator.validate_arguments(
-            spec,
-            step.arguments or {},
+        ToolContractValidator.validate_arguments(
+            spec=spec,
+            arguments=step.tool_args or {},
         )
 
     @staticmethod
     def validate_arguments(
         spec: ToolSpec,
-        arguments: dict[str, Any] | None,
+        arguments: Mapping[str, Any],
     ) -> dict[str, Any]:
-        if not isinstance(
-            spec,
-            ToolSpec,
+        if not isinstance(spec, ToolSpec):
+            raise TypeError(
+                "spec must be a ToolSpec"
+            )
+
+        if not isinstance(arguments, Mapping):
+            raise TypeError(
+                "arguments must be a mapping"
+            )
+
+        schema = spec.arguments_schema or {}
+
+        properties = schema.get(
+            "properties",
+            {},
+        )
+
+        required = schema.get(
+            "required",
+            [],
+        )
+
+        unknown_arguments = (
+            set(arguments)
+            - set(properties)
+        )
+
+        if (
+            unknown_arguments
+            and schema.get(
+                "additionalProperties",
+                True,
+            )
+            is False
         ):
-            raise ToolContractError(
-                "spec must be a ToolSpec instance."
+            raise ValueError(
+                "Unknown arguments for "
+                f"{spec.name}: "
+                f"{sorted(unknown_arguments)}"
             )
 
-        arguments = (
-            {}
-            if arguments is None
-            else arguments
-        )
+        missing_arguments = [
+            name
+            for name in required
+            if name not in arguments
+        ]
 
-        if not isinstance(
-            arguments,
-            dict,
-        ):
-            raise ToolArgumentError(
-                f"Tool '{spec.name}' received "
-                f"non-dict arguments."
+        if missing_arguments:
+            raise ValueError(
+                "Missing required arguments "
+                f"for {spec.name}: "
+                f"{missing_arguments}"
             )
-
-        schema = (
-            ToolContractValidator
-            ._resolve_schema(spec)
-        )
-
-        unknown = sorted(
-            set(arguments) - set(schema)
-        )
-
-        if unknown:
-            raise ToolArgumentError(
-                f"Tool '{spec.name}' does not accept "
-                f"argument(s): {unknown}."
-            )
-
-        for name, meta in schema.items():
-            if ToolContractValidator._is_required(
-                meta
-            ):
-                if (
-                    name not in arguments
-                    or arguments[name] is None
-                ):
-                    raise ToolArgumentError(
-                        f"Tool '{spec.name}' requires "
-                        f"argument '{name}'."
-                    )
 
         for name, value in arguments.items():
-            ToolContractValidator._validate_type(
+            if name not in properties:
+                continue
+
+            property_schema = properties[name]
+
+            ToolContractValidator._validate_value(
                 tool_name=spec.name,
-                arg_name=name,
+                argument_name=name,
                 value=value,
-                meta=schema[name],
+                schema=property_schema,
             )
 
         return dict(arguments)
 
     @staticmethod
-    def validate_modality(
-        spec: ToolSpec,
-        modality: ToolModality,
-    ) -> None:
-        if not spec.supports_modality(
-            modality
-        ):
-            raise ToolContractError(
-                f"Tool '{spec.name}' does not support "
-                f"modality '{modality.value}'.",
-                tool_name=spec.name,
-            )
-
-    @staticmethod
-    def validate_capability(
-        spec: ToolSpec,
-        capability: ToolCapability,
-    ) -> None:
-        if not spec.supports_capability(
-            capability
-        ):
-            raise ToolContractError(
-                f"Tool '{spec.name}' does not provide "
-                f"capability '{capability.value}'.",
-                tool_name=spec.name,
-            )
-
-    @staticmethod
-    def _resolve_schema(
-        spec: ToolSpec,
-    ) -> dict[str, Any]:
-        schema = spec.arguments_schema
-
-        if not isinstance(
-            schema,
-            dict,
-        ):
-            raise ToolContractError(
-                f"Tool '{spec.name}' has invalid "
-                "arguments_schema."
-            )
-
-        if (
-            "properties" in schema
-            and isinstance(
-                schema["properties"],
-                dict,
-            )
-        ):
-            properties = schema["properties"]
-            required = set(
-                schema.get(
-                    "required",
-                    [],
-                )
-                or []
-            )
-
-            result: dict[str, Any] = {}
-
-            for name, meta in properties.items():
-                item = dict(
-                    meta or {}
-                )
-                item["_required"] = (
-                    name in required
-                )
-                result[name] = item
-
-            return result
-
-        return dict(schema)
-
-    @staticmethod
-    def _is_required(
-        meta: Any,
-    ) -> bool:
-        if not isinstance(
-            meta,
-            dict,
-        ):
-            return True
-
-        if "_required" in meta:
-            return bool(
-                meta["_required"]
-            )
-
-        if "optional" in meta:
-            return not bool(
-                meta["optional"]
-            )
-
-        if "default" in meta:
-            return False
-
-        return True
-
-    @staticmethod
-    def _validate_type(
+    def _validate_value(
         *,
         tool_name: str,
-        arg_name: str,
+        argument_name: str,
         value: Any,
-        meta: Any,
+        schema: Mapping[str, Any],
     ) -> None:
-        if not isinstance(
-            meta,
-            dict,
-        ):
+        expected_type = schema.get("type")
+
+        if expected_type is None:
             return
 
-        value_type = str(
-            meta.get(
-                "type",
-                "string",
-            )
-        ).lower()
-
-        if value_type in {
-            "any",
-            "null",
-        }:
+        if expected_type == "string":
+            if not isinstance(value, str):
+                raise TypeError(
+                    f"Argument '{argument_name}' "
+                    f"for tool '{tool_name}' "
+                    "must be a string"
+                )
             return
 
-        if value is None:
+        if expected_type == "integer":
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+            ):
+                raise TypeError(
+                    f"Argument '{argument_name}' "
+                    f"for tool '{tool_name}' "
+                    "must be an integer"
+                )
             return
 
-        if value_type in {
-            "integer",
-            "int",
-        }:
-            valid = (
-                isinstance(
-                    value,
-                    int,
+        if expected_type == "number":
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+            ):
+                raise TypeError(
+                    f"Argument '{argument_name}' "
+                    f"for tool '{tool_name}' "
+                    "must be a number"
                 )
-                and not isinstance(
-                    value,
-                    bool,
+            return
+
+        if expected_type == "boolean":
+            if not isinstance(value, bool):
+                raise TypeError(
+                    f"Argument '{argument_name}' "
+                    f"for tool '{tool_name}' "
+                    "must be a boolean"
                 )
-            )
+            return
 
-        elif value_type in {
-            "number",
-            "float",
-        }:
-            valid = (
-                isinstance(
-                    value,
-                    (int, float),
+        if expected_type == "array":
+            if not isinstance(value, list):
+                raise TypeError(
+                    f"Argument '{argument_name}' "
+                    f"for tool '{tool_name}' "
+                    "must be an array"
                 )
-                and not isinstance(
-                    value,
-                    bool,
+            return
+
+        if expected_type == "object":
+            if not isinstance(value, Mapping):
+                raise TypeError(
+                    f"Argument '{argument_name}' "
+                    f"for tool '{tool_name}' "
+                    "must be an object"
                 )
-            )
-
-        elif value_type in {
-            "string",
-            "str",
-        }:
-            valid = isinstance(
-                value,
-                str,
-            )
-
-        elif value_type in {
-            "boolean",
-            "bool",
-        }:
-            valid = isinstance(
-                value,
-                bool,
-            )
-
-        elif value_type in {
-            "array",
-            "list",
-        }:
-            valid = isinstance(
-                value,
-                (list, tuple),
-            )
-
-        elif value_type in {
-            "object",
-            "dict",
-        }:
-            valid = isinstance(
-                value,
-                dict,
-            )
-
-        else:
-            raise ToolContractError(
-                f"Tool '{tool_name}' argument "
-                f"'{arg_name}' uses unsupported "
-                f"type '{value_type}'.",
-                tool_name=tool_name,
-            )
-
-        if not valid:
-            raise ToolArgumentError(
-                f"Tool '{tool_name}' argument "
-                f"'{arg_name}' must be of type "
-                f"{value_type}, got "
-                f"{type(value).__name__}."
-            )
+            return

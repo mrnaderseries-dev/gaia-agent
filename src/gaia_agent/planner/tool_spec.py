@@ -16,35 +16,24 @@ class ToolCapability(str, Enum):
 
 class ToolModality(str, Enum):
     TEXT = "text"
-    WEB = "web"
-    IMAGE = "image"
-    VIDEO = "video"
-    AUDIO = "audio"
     FILE = "file"
-    SPREADSHEET = "spreadsheet"
-    CODE = "code"
+    IMAGE = "image"
+    VISION = "vision"
+    AUDIO = "audio"
+    VIDEO = "video"
+    EXCEL = "excel"
 
 
 class ToolErrorCode(str, Enum):
-    INVALID_ARGUMENTS = "invalid_arguments"
+    INVALID_ARGUMENT = "invalid_argument"
     FILE_NOT_FOUND = "file_not_found"
-    INVALID_FILE = "invalid_file"
-    DECODE_ERROR = "decode_error"
-    INVALID_IMAGE = "invalid_image"
-    INVALID_SPREADSHEET = "invalid_spreadsheet"
     UNSUPPORTED_FORMAT = "unsupported_format"
-    UNSUPPORTED_MODALITY = "unsupported_modality"
-    NETWORK_ERROR = "network_error"
-    RATE_LIMIT = "rate_limit"
+    EXECUTION_FAILED = "execution_failed"
+    PERMISSION_DENIED = "permission_denied"
     TIMEOUT = "timeout"
-    VIDEO_UNAVAILABLE = "video_unavailable"
-    AUDIO_UNAVAILABLE = "audio_unavailable"
-    TRANSCRIPTION_ERROR = "transcription_error"
-    VISION_ERROR = "vision_error"
-    EXECUTION_ERROR = "execution_error"
-    SYNTAX_ERROR = "syntax_error"
-    IMPORT_ERROR = "import_error"
-    LLM_ERROR = "llm_error"
+    NETWORK_ERROR = "network_error"
+    NOT_FOUND = "not_found"
+    RATE_LIMITED = "rate_limited"
 
 
 class ToolSpec(BaseModel):
@@ -53,12 +42,8 @@ class ToolSpec(BaseModel):
         frozen=True,
     )
 
-    name: str = Field(
-        ...,
-        min_length=1,
-    )
-
-    description: str
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
 
     arguments_schema: dict[str, Any] = Field(
         default_factory=dict,
@@ -78,14 +63,11 @@ class ToolSpec(BaseModel):
         default_factory=frozenset,
     )
 
-    allowed_imports: tuple[str, ...] = Field(
-        default_factory=tuple,
+    allowed_imports: frozenset[str] = Field(
+        default_factory=frozenset,
     )
 
-    function: Callable[..., Any] | None = Field(
-        default=None,
-        exclude=True,
-    )
+    function: Callable[..., Any] | None = None
 
     def supports_modality(
         self,
