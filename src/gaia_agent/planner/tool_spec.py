@@ -34,6 +34,11 @@ class ToolErrorCode(str, Enum):
     NETWORK_ERROR = "network_error"
     NOT_FOUND = "not_found"
     RATE_LIMITED = "rate_limited"
+    INVALID_FILE = "invalid_file"
+    DECODE_ERROR = "decode_error"
+
+
+
 
 
 class ToolSpec(BaseModel):

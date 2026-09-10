@@ -4,7 +4,6 @@ from typing import Any
 
 from smolagents import (
     DuckDuckGoSearchTool,
-    Tool,
     VisitWebpageTool,
 )
 
@@ -33,7 +32,6 @@ class SafeDuckDuckGoSearch:
             arguments_schema=dict(self.inputs),
             capability=ToolCapability.NETWORK_READ,
             modalities=frozenset({
-                ToolModality.WEB,
                 ToolModality.TEXT,
             }),
             result_schema={
@@ -41,9 +39,10 @@ class SafeDuckDuckGoSearch:
             },
             error_codes=frozenset({
                 ToolErrorCode.NETWORK_ERROR,
-                ToolErrorCode.RATE_LIMIT,
+                ToolErrorCode.RATE_LIMITED,
                 ToolErrorCode.TIMEOUT,
             }),
+            allowed_imports=frozenset(),
             function=self,
         )
 
@@ -84,7 +83,6 @@ class SafeVisitWebpage:
             arguments_schema=dict(self.inputs),
             capability=ToolCapability.NETWORK_READ,
             modalities=frozenset({
-                ToolModality.WEB,
                 ToolModality.TEXT,
             }),
             result_schema={
@@ -92,9 +90,11 @@ class SafeVisitWebpage:
             },
             error_codes=frozenset({
                 ToolErrorCode.NETWORK_ERROR,
-                ToolErrorCode.RATE_LIMIT,
+                ToolErrorCode.RATE_LIMITED,
                 ToolErrorCode.TIMEOUT,
+                ToolErrorCode.NOT_FOUND,
             }),
+            allowed_imports=frozenset(),
             function=self,
         )
 
@@ -131,11 +131,12 @@ class SafeYoutubeTranscript:
                 "type": self.output_type,
             },
             error_codes=frozenset({
-                ToolErrorCode.VIDEO_UNAVAILABLE,
+                ToolErrorCode.NOT_FOUND,
                 ToolErrorCode.NETWORK_ERROR,
-                ToolErrorCode.RATE_LIMIT,
+                ToolErrorCode.RATE_LIMITED,
                 ToolErrorCode.TIMEOUT,
             }),
+            allowed_imports=frozenset(),
             function=self,
         )
 
@@ -151,7 +152,7 @@ class WebTools:
         self.search = SafeDuckDuckGoSearch()
         self.visit = SafeVisitWebpage()
 
-        self._tools = [
+        self._tools: list[Any] = [
             self.search,
             self.visit,
         ]
@@ -162,9 +163,7 @@ class WebTools:
             self.youtube = None
 
         if self.youtube is not None:
-            self._tools.append(
-                self.youtube
-            )
+            self._tools.append(self.youtube)
 
     def get_tools(self) -> list[Any]:
         return list(self._tools)
