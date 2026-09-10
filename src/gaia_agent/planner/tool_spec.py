@@ -14,57 +14,87 @@ class ToolCapability(str, Enum):
     DESTRUCTIVE = "destructive"
 
 
-TOOL_CAPABILITIES: dict[str, ToolCapability] = {
-    "web_search": ToolCapability.NETWORK_READ,
-    "visit_webpage": ToolCapability.NETWORK_READ,
-    "youtube_transcript": ToolCapability.NETWORK_READ,
+class ToolModality(str, Enum):
+    TEXT = "text"
+    WEB = "web"
+    IMAGE = "image"
+    VIDEO = "video"
+    AUDIO = "audio"
+    FILE = "file"
+    SPREADSHEET = "spreadsheet"
+    CODE = "code"
 
-    "python_interpreter": ToolCapability.COMPUTATION,
 
-    "file_reader": ToolCapability.READ_ONLY,
-    "analyze_image": ToolCapability.READ_ONLY,
-    "analyze_excel": ToolCapability.READ_ONLY,
-    "transcribe_audio": ToolCapability.READ_ONLY,
-}
+class ToolErrorCode(str, Enum):
+    INVALID_ARGUMENTS = "invalid_arguments"
+    FILE_NOT_FOUND = "file_not_found"
+    INVALID_FILE = "invalid_file"
+    DECODE_ERROR = "decode_error"
+    INVALID_IMAGE = "invalid_image"
+    INVALID_SPREADSHEET = "invalid_spreadsheet"
+    UNSUPPORTED_FORMAT = "unsupported_format"
+    UNSUPPORTED_MODALITY = "unsupported_modality"
+    NETWORK_ERROR = "network_error"
+    RATE_LIMIT = "rate_limit"
+    TIMEOUT = "timeout"
+    VIDEO_UNAVAILABLE = "video_unavailable"
+    AUDIO_UNAVAILABLE = "audio_unavailable"
+    TRANSCRIPTION_ERROR = "transcription_error"
+    VISION_ERROR = "vision_error"
+    EXECUTION_ERROR = "execution_error"
+    SYNTAX_ERROR = "syntax_error"
+    IMPORT_ERROR = "import_error"
+    LLM_ERROR = "llm_error"
 
 
 class ToolSpec(BaseModel):
-
     model_config = ConfigDict(
-        arbitrary_types_allowed=True
+        arbitrary_types_allowed=True,
+        frozen=True,
     )
 
     name: str = Field(
         ...,
-        description="Unique registered tool name",
+        min_length=1,
     )
 
-    description: str = Field(
-        ...,
-        description="What the tool does",
-    )
+    description: str
 
     arguments_schema: dict[str, Any] = Field(
         default_factory=dict,
-        description="Exact arguments accepted by the tool",
     )
 
-    capability: ToolCapability = Field(
-        ...,
-        description="Security/side-effect capability",
+    capability: ToolCapability
+
+    modalities: frozenset[ToolModality] = Field(
+        default_factory=frozenset,
     )
 
     result_schema: dict[str, Any] = Field(
         default_factory=dict,
-        description="Shape/type of the tool result",
     )
 
-    error_codes: list[str] = Field(
-        default_factory=list
+    error_codes: frozenset[ToolErrorCode] = Field(
+        default_factory=frozenset,
     )
 
-    allowed_imports: list[str] = Field(
-        default_factory=list
+    allowed_imports: tuple[str, ...] = Field(
+        default_factory=tuple,
     )
 
-    function: Callable[..., Any] | None = None
+    function: Callable[..., Any] | None = Field(
+        default=None,
+        exclude=True,
+    )
+
+    def supports_modality(
+        self,
+        modality: ToolModality,
+    ) -> bool:
+        return modality in self.modalities
+
+    def supports_capability(
+        self,
+        capability: ToolCapability,
+    ) -> bool:
+        return self.capability == capability

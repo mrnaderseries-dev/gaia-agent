@@ -2,34 +2,46 @@ from __future__ import annotations
 
 from typing import Any
 
-from gaia_agent.planner.plan_schema import PlanStep, StepType
-from gaia_agent.reliability.exception import ToolArgumentError
+from gaia_agent.planner.plan_schema import (
+    PlanStep,
+    StepType,
+)
+from gaia_agent.planner.tool_spec import (
+    ToolCapability,
+    ToolModality,
+    ToolSpec,
+)
+from gaia_agent.reliability.exception import (
+    ToolArgumentError,
+)
 
 
 class ToolContractError(ValueError):
-    """Raised when a plan violates a tool contract."""
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool_name: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.tool_name = tool_name
+        self.details = details or {}
 
 
 class ToolContractValidator:
-    """
-    Deterministic validation performed before tool execution.
-
-    Guarantees:
-    - tool exists
-    - arguments are a dictionary
-    - no undeclared arguments
-    - required arguments exist
-    - argument types are compatible
-    """
-
     @staticmethod
     def validate_step_contract(
         step: PlanStep,
-        available_tools: dict[str, Any],
+        available_tools: dict[str, ToolSpec],
     ) -> dict[str, Any]:
-
-        if not isinstance(step, PlanStep):
-            raise ToolContractError("Step must be a PlanStep instance.")
+        if not isinstance(
+            step,
+            PlanStep,
+        ):
+            raise ToolContractError(
+                "Step must be a PlanStep instance."
+            )
 
         if step.step_type != StepType.TOOL:
             return {}
@@ -39,60 +51,78 @@ class ToolContractValidator:
                 "Tool step does not specify a tool_name."
             )
 
-        if not isinstance(available_tools, dict):
-            raise ToolContractError(
-                "available_tools must be a dict of name -> contract."
-            )
-
-        spec = available_tools.get(step.tool_name)
+        spec = available_tools.get(
+            step.tool_name
+        )
 
         if spec is None:
             raise ToolContractError(
-                f"Tool '{step.tool_name}' is not registered. "
-                f"Registered tools: {sorted(available_tools)}."
+                f"Tool '{step.tool_name}' is not registered.",
+                tool_name=step.tool_name,
             )
 
         return ToolContractValidator.validate_arguments(
-            spec=spec,
-            arguments=step.arguments or {},
+            spec,
+            step.arguments or {},
         )
 
     @staticmethod
     def validate_arguments(
-        spec: Any,
+        spec: ToolSpec,
         arguments: dict[str, Any] | None,
     ) -> dict[str, Any]:
-
-        if arguments is None:
-            arguments = {}
-
-        if not isinstance(arguments, dict):
-            raise ToolArgumentError(
-                f"Tool '{spec.name}' received non-dict arguments: "
-                f"{type(arguments).__name__}."
+        if not isinstance(
+            spec,
+            ToolSpec,
+        ):
+            raise ToolContractError(
+                "spec must be a ToolSpec instance."
             )
 
-        schema = ToolContractValidator._resolve_schema(spec)
+        arguments = (
+            {}
+            if arguments is None
+            else arguments
+        )
 
-        args = dict(arguments)
+        if not isinstance(
+            arguments,
+            dict,
+        ):
+            raise ToolArgumentError(
+                f"Tool '{spec.name}' received "
+                f"non-dict arguments."
+            )
 
-        unknown = sorted(set(args) - set(schema))
+        schema = (
+            ToolContractValidator
+            ._resolve_schema(spec)
+        )
+
+        unknown = sorted(
+            set(arguments) - set(schema)
+        )
 
         if unknown:
             raise ToolArgumentError(
-                f"Tool '{spec.name}' does not accept argument(s): "
-                f"{unknown}. "
-                f"Allowed arguments: {sorted(schema)}."
+                f"Tool '{spec.name}' does not accept "
+                f"argument(s): {unknown}."
             )
 
         for name, meta in schema.items():
-            if ToolContractValidator._is_required(name, meta):
-                if name not in args or args[name] is None:
+            if ToolContractValidator._is_required(
+                meta
+            ):
+                if (
+                    name not in arguments
+                    or arguments[name] is None
+                ):
                     raise ToolArgumentError(
-                        f"Tool '{spec.name}' requires argument '{name}'."
+                        f"Tool '{spec.name}' requires "
+                        f"argument '{name}'."
                     )
 
-        for name, value in args.items():
+        for name, value in arguments.items():
             ToolContractValidator._validate_type(
                 tool_name=spec.name,
                 arg_name=name,
@@ -100,52 +130,101 @@ class ToolContractValidator:
                 meta=schema[name],
             )
 
-        return args
+        return dict(arguments)
 
     @staticmethod
-    def _resolve_schema(spec: Any) -> dict[str, Any]:
-        schema = getattr(spec, "arguments_schema", None) or {}
-
-        if not isinstance(schema, dict):
+    def validate_modality(
+        spec: ToolSpec,
+        modality: ToolModality,
+    ) -> None:
+        if not spec.supports_modality(
+            modality
+        ):
             raise ToolContractError(
-                f"Tool '{getattr(spec, 'name', '?')}' has an invalid "
+                f"Tool '{spec.name}' does not support "
+                f"modality '{modality.value}'.",
+                tool_name=spec.name,
+            )
+
+    @staticmethod
+    def validate_capability(
+        spec: ToolSpec,
+        capability: ToolCapability,
+    ) -> None:
+        if not spec.supports_capability(
+            capability
+        ):
+            raise ToolContractError(
+                f"Tool '{spec.name}' does not provide "
+                f"capability '{capability.value}'.",
+                tool_name=spec.name,
+            )
+
+    @staticmethod
+    def _resolve_schema(
+        spec: ToolSpec,
+    ) -> dict[str, Any]:
+        schema = spec.arguments_schema
+
+        if not isinstance(
+            schema,
+            dict,
+        ):
+            raise ToolContractError(
+                f"Tool '{spec.name}' has invalid "
                 "arguments_schema."
             )
 
-      
-        if "properties" in schema and isinstance(
-            schema["properties"],
-            dict,
+        if (
+            "properties" in schema
+            and isinstance(
+                schema["properties"],
+                dict,
+            )
         ):
             properties = schema["properties"]
-            required = set(schema.get("required", []) or [])
+            required = set(
+                schema.get(
+                    "required",
+                    [],
+                )
+                or []
+            )
 
-            normalized: dict[str, Any] = {}
+            result: dict[str, Any] = {}
 
             for name, meta in properties.items():
-                item = dict(meta or {})
-                item["_required"] = name in required
-                normalized[name] = item
+                item = dict(
+                    meta or {}
+                )
+                item["_required"] = (
+                    name in required
+                )
+                result[name] = item
 
-            return normalized
+            return result
 
-       
         return dict(schema)
 
     @staticmethod
     def _is_required(
-        name: str,
         meta: Any,
     ) -> bool:
-
-        if not isinstance(meta, dict):
+        if not isinstance(
+            meta,
+            dict,
+        ):
             return True
 
         if "_required" in meta:
-            return bool(meta["_required"])
+            return bool(
+                meta["_required"]
+            )
 
         if "optional" in meta:
-            return not bool(meta["optional"])
+            return not bool(
+                meta["optional"]
+            )
 
         if "default" in meta:
             return False
@@ -160,52 +239,106 @@ class ToolContractValidator:
         value: Any,
         meta: Any,
     ) -> None:
-
-        if not isinstance(meta, dict):
+        if not isinstance(
+            meta,
+            dict,
+        ):
             return
 
         value_type = str(
-            meta.get("type", "string")
+            meta.get(
+                "type",
+                "string",
+            )
         ).lower()
 
-        if value_type in {"any", "null"}:
+        if value_type in {
+            "any",
+            "null",
+        }:
             return
 
         if value is None:
             return
 
-        if value_type in {"integer", "int"}:
-            valid = isinstance(value, int) and not isinstance(value, bool)
-
-        elif value_type in {"number", "float"}:
+        if value_type in {
+            "integer",
+            "int",
+        }:
             valid = (
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
+                isinstance(
+                    value,
+                    int,
+                )
+                and not isinstance(
+                    value,
+                    bool,
+                )
             )
 
-        elif value_type in {"string", "str"}:
-            valid = isinstance(value, str)
+        elif value_type in {
+            "number",
+            "float",
+        }:
+            valid = (
+                isinstance(
+                    value,
+                    (int, float),
+                )
+                and not isinstance(
+                    value,
+                    bool,
+                )
+            )
 
-        elif value_type in {"boolean", "bool"}:
-            valid = isinstance(value, bool)
+        elif value_type in {
+            "string",
+            "str",
+        }:
+            valid = isinstance(
+                value,
+                str,
+            )
 
-        elif value_type in {"array", "list"}:
-            valid = isinstance(value, (list, tuple))
+        elif value_type in {
+            "boolean",
+            "bool",
+        }:
+            valid = isinstance(
+                value,
+                bool,
+            )
 
-        elif value_type in {"object", "dict"}:
-            valid = isinstance(value, dict)
+        elif value_type in {
+            "array",
+            "list",
+        }:
+            valid = isinstance(
+                value,
+                (list, tuple),
+            )
+
+        elif value_type in {
+            "object",
+            "dict",
+        }:
+            valid = isinstance(
+                value,
+                dict,
+            )
 
         else:
-         
-           
             raise ToolContractError(
-                f"Tool '{tool_name}' argument '{arg_name}' "
-                f"uses unsupported schema type '{value_type}'."
+                f"Tool '{tool_name}' argument "
+                f"'{arg_name}' uses unsupported "
+                f"type '{value_type}'.",
+                tool_name=tool_name,
             )
 
         if not valid:
             raise ToolArgumentError(
-                f"Tool '{tool_name}' argument '{arg_name}' "
-                f"must be of type {value_type}, "
-                f"got {type(value).__name__}."
+                f"Tool '{tool_name}' argument "
+                f"'{arg_name}' must be of type "
+                f"{value_type}, got "
+                f"{type(value).__name__}."
             )

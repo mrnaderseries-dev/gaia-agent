@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import sys
+import inspect
 from typing import Any
 
 from gaia_agent.llm.service import LLMService
 from gaia_agent.planner.tool_spec import (
-    TOOL_CAPABILITIES,
     ToolCapability,
+    ToolModality,
     ToolSpec,
 )
 from gaia_agent.tools.contract_validator import (
     ToolContractValidator,
 )
+
 from .audio import AudioTools
 from .excel import ExcelTools
 from .files import FileTools
@@ -20,125 +21,124 @@ from .vision import VisionTools
 from .web import WebTools
 
 
-PYTHON_ALLOWED_IMPORTS: list[str] = [
-    "math",
-    "json",
-    "re",
-    "datetime",
-    "itertools",
-    "functools",
-    "collections",
-    "statistics",
-    "string",
-    "typing",
-]
-
-
 class _RegisteredTool:
-
-    def __init__(self, tool: Any) -> None:
+    def __init__(
+        self,
+        tool: Any,
+        spec: ToolSpec,
+    ) -> None:
         if tool is None:
             raise ValueError(
                 "Cannot register a None tool."
             )
 
-        name = getattr(tool, "name", None)
+        if not isinstance(
+            spec,
+            ToolSpec,
+        ):
+            raise TypeError(
+                "Tool must provide a ToolSpec."
+            )
 
-        if not isinstance(name, str) or not name.strip():
+        implementation_name = getattr(
+            tool,
+            "name",
+            None,
+        )
+
+        if (
+            not isinstance(
+                implementation_name,
+                str,
+            )
+            or not implementation_name.strip()
+        ):
             raise ValueError(
-                "Every registered tool must have a "
+                "Every tool must have a "
                 "non-empty name."
             )
 
-        description = getattr(
-            tool,
-            "description",
-            "",
-        )
-
-        if not isinstance(description, str):
-            description = str(description)
-
-        inputs = getattr(
-            tool,
-            "inputs",
-            {},
-        ) or {}
-
-        if not isinstance(inputs, dict):
-            raise TypeError(
-                f"Tool '{name}' has invalid inputs schema: "
-                f"{type(inputs).__name__}."
+        if implementation_name != spec.name:
+            raise ValueError(
+                f"Tool name '{implementation_name}' "
+                f"does not match ToolSpec name "
+                f"'{spec.name}'."
             )
 
-        output_type = getattr(
-            tool,
-            "output_type",
-            "string",
-        )
+        if spec.function is None:
+            raise ValueError(
+                f"ToolSpec '{spec.name}' must "
+                "define its function."
+            )
 
         self._tool = tool
-        self.name = name
-        self.description = description
-        self.inputs = dict(inputs)
-        self.output_type = output_type
+        self.spec = spec
+
+    @property
+    def name(self) -> str:
+        return self.spec.name
+
+    @property
+    def description(self) -> str:
+        return self.spec.description
+
+    @property
+    def inputs(self) -> dict[str, Any]:
+        return self.spec.arguments_schema
+
+    @property
+    def output_type(self) -> str:
+        return str(
+            self.spec.result_schema.get(
+                "type",
+                "string",
+            )
+        )
 
     async def execute(
         self,
         **arguments: Any,
     ) -> Any:
-        validated_arguments = self.validate_arguments(
-            arguments
+        validated = (
+            self.validate_arguments(
+                arguments
+            )
         )
 
-        return self._tool(
-            **validated_arguments
+        result = self.spec.function(
+            **validated
         )
+
+        if inspect.isawaitable(
+            result
+        ):
+            return await result
+
+        return result
 
     def validate_arguments(
         self,
         arguments: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """
-        Validate arguments against the canonical ToolSpec.
-        """
-        spec = self.build_spec()
-
         return ToolContractValidator.validate_arguments(
-            spec=spec,
-            arguments=arguments,
+            self.spec,
+            arguments,
         )
 
-    def build_spec(self) -> ToolSpec:
-        capability = TOOL_CAPABILITIES.get(
-            self.name
+    def supports_modality(
+        self,
+        modality: ToolModality,
+    ) -> bool:
+        return self.spec.supports_modality(
+            modality
         )
 
-        if capability is None:
-            raise RuntimeError(
-                f"Tool '{self.name}' has no declared "
-                "ToolCapability. Add it explicitly to "
-                "TOOL_CAPABILITIES before registering "
-                "the tool."
-            )
-
-        allowed_imports: list[str] = []
-
-        if self.name == "python_interpreter":
-            allowed_imports = list(
-                PYTHON_ALLOWED_IMPORTS
-            )
-
-        return ToolSpec(
-            name=self.name,
-            description=self.description,
-            arguments_schema=dict(self.inputs),
-            capability=capability,
-            result_schema={
-                "type": self.output_type,
-            },
-            error_codes=[],
-            allowed_imports=allowed_imports,
+    def supports_capability(
+        self,
+        capability: ToolCapability,
+    ) -> bool:
+        return self.spec.supports_capability(
+            capability
         )
 
 
@@ -154,7 +154,6 @@ class ToolRegistry:
         stt_device: str = "cpu",
         stt_compute_type: str = "int8",
     ) -> None:
-
         if llm_service is None:
             raise ValueError(
                 "ToolRegistry requires an llm_service."
@@ -170,96 +169,153 @@ class ToolRegistry:
         )
 
         self.stt_backend = stt_backend
-
         self.stt_model_size = stt_model_size
         self.stt_device = stt_device
         self.stt_compute_type = stt_compute_type
-
-        self._tools: list[_RegisteredTool] = (
-            self._build_tools()
-        )
 
         self._tools_by_name: dict[
             str,
             _RegisteredTool,
         ] = {}
 
-        for tool in self._tools:
-            if tool.name in self._tools_by_name:
+        self._register_group(
+            FileTools(
+                base_dir=self.base_dir
+            ).get_tools()
+        )
+
+        self._register_group(
+            AudioTools(
+                stt_backend=self.stt_backend,
+                base_dir=self.base_dir,
+                stt_model_size=self.stt_model_size,
+                stt_device=self.stt_device,
+                stt_compute_type=self.stt_compute_type,
+            ).get_tools()
+        )
+
+        self._register_group(
+            VisionTools(
+                llm_service=self.vision_llm_service,
+                base_dir=self.base_dir,
+            ).get_tools()
+        )
+
+        self._register_group(
+            ExcelTools(
+                llm_service=self.llm_service,
+                base_dir=self.base_dir,
+            ).get_tools()
+        )
+
+        self._register_group(
+            PythonTools().get_tools()
+        )
+
+        self._register_group(
+            WebTools().get_tools()
+        )
+
+    def _register_group(
+        self,
+        tools: list[Any],
+    ) -> None:
+        for tool in tools:
+            spec = self._extract_spec(
+                tool
+            )
+
+            if spec.name in self._tools_by_name:
                 raise RuntimeError(
                     "Duplicate tool name detected: "
-                    f"'{tool.name}'."
+                    f"'{spec.name}'."
                 )
 
-            self._tools_by_name[tool.name] = tool
+            self._validate_spec(
+                tool,
+                spec,
+            )
 
-        self._specs_by_name: dict[
-            str,
+            self._tools_by_name[
+                spec.name
+            ] = _RegisteredTool(
+                tool=tool,
+                spec=spec,
+            )
+
+    @staticmethod
+    def _extract_spec(
+        tool: Any,
+    ) -> ToolSpec:
+        spec = getattr(
+            tool,
+            "spec",
+            None,
+        )
+
+        if not isinstance(
+            spec,
             ToolSpec,
-        ] = {}
+        ):
+            raise TypeError(
+                f"Tool '{getattr(tool, 'name', '?')}' "
+                "must expose a ToolSpec through "
+                "the 'spec' attribute."
+            )
 
-        self.get_tool_specs()
+        return spec
 
-    def _build_tools(
-        self,
-    ) -> list[_RegisteredTool]:
-        """
-        Construct every tool exposed to the agent.
-        """
-        file_tools = FileTools(
-            base_dir=self.base_dir,
+    @staticmethod
+    def _validate_spec(
+        tool: Any,
+        spec: ToolSpec,
+    ) -> None:
+        implementation_name = getattr(
+            tool,
+            "name",
+            None,
         )
 
-        audio_tools = AudioTools(
-            stt_backend=self.stt_backend,
-            base_dir=self.base_dir,
-            stt_model_size=self.stt_model_size,
-            stt_device=self.stt_device,
-            stt_compute_type=self.stt_compute_type,
-        )
+        if implementation_name != spec.name:
+            raise ValueError(
+                f"Tool implementation name "
+                f"'{implementation_name}' does not "
+                f"match ToolSpec name '{spec.name}'."
+            )
 
-        vision_tools = VisionTools(
-            llm_service=self.vision_llm_service,
-            base_dir=self.base_dir,
-        )
+        if spec.function is None:
+            raise ValueError(
+                f"Tool '{spec.name}' has no "
+                "execution function."
+            )
 
-        excel_tools = ExcelTools(
-            llm_service=self.llm_service,
-            base_dir=self.base_dir,
-        )
-
-        python_tools = PythonTools()
-        web_tools = WebTools()
-
-        raw_tools: list[Any] = []
-
-        raw_tools.extend(file_tools.get_tools())
-        raw_tools.extend(audio_tools.get_tools())
-        raw_tools.extend(vision_tools.get_tools())
-        raw_tools.extend(excel_tools.get_tools())
-        raw_tools.extend(python_tools.get_tools())
-        raw_tools.extend(web_tools.get_tools())
-
-        return [
-            _RegisteredTool(tool)
-            for tool in raw_tools
-        ]
+        if not spec.modalities:
+            raise ValueError(
+                f"Tool '{spec.name}' must declare "
+                "at least one modality."
+            )
 
     def get_tools(
         self,
     ) -> list[_RegisteredTool]:
-        return list(self._tools)
+        return list(
+            self._tools_by_name.values()
+        )
 
     def get(
         self,
         tool_name: str,
     ) -> _RegisteredTool:
         if (
-            not isinstance(tool_name, str)
+            not isinstance(
+                tool_name,
+                str,
+            )
             or not tool_name.strip()
         ):
             raise ValueError(
-                "tool_name must be a non-empty string."
+                "tool_name must be a "
+                "non-empty string."
             )
 
         try:
@@ -267,72 +323,114 @@ class ToolRegistry:
                 tool_name
             ]
         except KeyError as exc:
-            available = sorted(
-                self._tools_by_name
-            )
-
             raise KeyError(
                 f"Tool '{tool_name}' is not registered. "
-                f"Available tools: {available}"
+                f"Available tools: {self.names()}"
             ) from exc
 
     def get_spec(
         self,
         tool_name: str,
     ) -> ToolSpec:
-        if not self._specs_by_name:
-            self.get_tool_specs()
-
-        try:
-            return self._specs_by_name[
-                tool_name
-            ]
-        except KeyError as exc:
-            raise KeyError(
-                f"No ToolSpec registered for tool "
-                f"'{tool_name}'."
-            ) from exc
+        return self.get(
+            tool_name
+        ).spec
 
     def get_tool_specs(
         self,
     ) -> list[ToolSpec]:
-        specs: list[ToolSpec] = []
-
-        for tool in self._tools:
-            spec = tool.build_spec()
-            specs.append(spec)
-
-        names = [
-            spec.name
-            for spec in specs
+        return [
+            tool.spec
+            for tool in self._tools_by_name.values()
         ]
-
-        if len(names) != len(set(names)):
-            raise RuntimeError(
-                "Duplicate ToolSpec names detected."
-            )
-
-        self._specs_by_name = {
-            spec.name: spec
-            for spec in specs
-        }
-
-        return list(specs)
 
     def validate_step(
         self,
         step: Any,
     ) -> dict[str, Any]:
-        return ToolContractValidator.validate_step_contract(
-            step=step,
-            available_tools=self._specs_by_name,
+        specs = {
+            spec.name: spec
+            for spec in self.get_tool_specs()
+        }
+
+        return (
+            ToolContractValidator
+            .validate_step_contract(
+                step=step,
+                available_tools=specs,
+            )
         )
+
+    def validate_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return self.get(
+            tool_name
+        ).validate_arguments(
+            arguments
+        )
+
+    def resolve(
+        self,
+        *,
+        modality: ToolModality | None = None,
+        capability: ToolCapability | None = None,
+    ) -> list[ToolSpec]:
+        specs = self.get_tool_specs()
+
+        if modality is not None:
+            specs = [
+                spec
+                for spec in specs
+                if spec.supports_modality(
+                    modality
+                )
+            ]
+
+        if capability is not None:
+            specs = [
+                spec
+                for spec in specs
+                if spec.supports_capability(
+                    capability
+                )
+            ]
+
+        return sorted(
+            specs,
+            key=lambda spec: spec.name,
+        )
+
+    def resolve_one(
+        self,
+        *,
+        modality: ToolModality | None = None,
+        capability: ToolCapability | None = None,
+    ) -> ToolSpec | None:
+        matches = self.resolve(
+            modality=modality,
+            capability=capability,
+        )
+
+        if not matches:
+            return None
+
+        return matches[0]
 
     def has(
         self,
         tool_name: str,
     ) -> bool:
-        return tool_name in self._tools_by_name
+        return (
+            isinstance(
+                tool_name,
+                str,
+            )
+            and tool_name
+            in self._tools_by_name
+        )
 
     def names(self) -> list[str]:
         return sorted(
@@ -343,6 +441,17 @@ class ToolRegistry:
         self,
     ) -> dict[str, ToolCapability]:
         return {
-            name: self.get_spec(name).capability
-            for name in self.names()
+            spec.name: spec.capability
+            for spec in self.get_tool_specs()
+        }
+
+    def modalities(
+        self,
+    ) -> dict[
+        str,
+        frozenset[ToolModality],
+    ]:
+        return {
+            spec.name: spec.modalities
+            for spec in self.get_tool_specs()
         }
