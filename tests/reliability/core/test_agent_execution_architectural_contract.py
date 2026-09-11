@@ -1,16 +1,27 @@
+from __future__ import annotations
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from gaia_agent.core.agent_execution import AgentExecution, ExecutionRequest
 from gaia_agent.core.llm_executor import LLMExecutionRequest
+from gaia_agent.core.policies.execution import ExecutionDecision
 from gaia_agent.planner.plan_schema import StepType
-from gaia_agent.reliability.errors import AgentError
 
 
-def build_execution(*, llm_executor=None, tool_registry=None, risk_assessor=None):
+def build_execution(
+    *,
+    llm_executor=None,
+    tool_registry=None,
+    risk_assessor=None,
+):
     execution_policy = MagicMock()
+    execution_policy.evaluate.return_value = ExecutionDecision.allow()
+
     approval_policy = MagicMock()
+    approval_policy.evaluate.return_value = False
+
     event_logger = MagicMock()
     metrics = MagicMock()
     tracer = MagicMock()
@@ -26,7 +37,7 @@ def build_execution(*, llm_executor=None, tool_registry=None, risk_assessor=None
     if risk_assessor is None:
         risk_assessor = MagicMock()
 
-    risk_assessor.assess = AsyncMock()
+    risk_assessor.assess = AsyncMock(return_value=None)
 
     return AgentExecution(
         tool_registry=tool_registry,
@@ -50,7 +61,7 @@ async def test_agent_execution_preserves_cross_layer_architectural_contract():
 
     tool_registry = MagicMock()
     risk_assessor = MagicMock()
-    risk_assessor.assess = AsyncMock()
+    risk_assessor.assess = AsyncMock(return_value=None)
 
     execution = build_execution(
         llm_executor=llm_executor,
@@ -89,11 +100,10 @@ async def test_agent_execution_preserves_cross_layer_architectural_contract():
     forwarded = llm_executor.execute.await_args.args[0]
 
     assert isinstance(forwarded, LLMExecutionRequest)
-
     assert forwarded.user_request == request.user_request
     assert forwarded.action == request.action
     assert forwarded.context is request.context
-    assert forwarded.metadata is request.metadata
+    assert forwarded.metadata == request.metadata
 
     assert not hasattr(forwarded, "phase")
     assert not hasattr(forwarded, "current_step")
@@ -108,6 +118,10 @@ async def test_agent_execution_preserves_cross_layer_architectural_contract():
 
     risk_context = risk_assessor.assess.await_args.args[0]
 
+    assert risk_context.action == request.action
+    assert risk_context.tool_name == request.tool_name
+    assert risk_context.arguments == request.arguments
+
     assert not hasattr(risk_context, "phase")
     assert not hasattr(risk_context, "current_step")
     assert not hasattr(risk_context, "completed_steps")
@@ -121,7 +135,7 @@ async def test_agent_execution_rejects_invalid_execution_contract_without_side_e
     llm_executor = AsyncMock()
     tool_registry = MagicMock()
     risk_assessor = MagicMock()
-    risk_assessor.assess = AsyncMock()
+    risk_assessor.assess = AsyncMock(return_value=None)
 
     execution = build_execution(
         llm_executor=llm_executor,
@@ -137,8 +151,11 @@ async def test_agent_execution_rejects_invalid_execution_contract_without_side_e
     ]
 
     for invalid_request in invalid_requests:
-        with pytest.raises((TypeError, AttributeError, ValueError)):
-            await execution.execute(invalid_request)
+        result = await execution.execute(invalid_request)
+
+        assert result.success is False
+        assert result.output is None
+        assert result.error is not None
 
     llm_executor.execute.assert_not_awaited()
     tool_registry.execute.assert_not_called()
@@ -148,17 +165,10 @@ async def test_agent_execution_rejects_invalid_execution_contract_without_side_e
 @pytest.mark.asyncio
 async def test_agent_execution_does_not_retry_or_recover_inside_execution_boundary():
     llm_executor = AsyncMock()
-    failure = RuntimeError("LLM failed")
-    llm_executor.execute.side_effect = failure
-
-    tool_registry = MagicMock()
-    risk_assessor = MagicMock()
-    risk_assessor.assess = AsyncMock()
+    llm_executor.execute.side_effect = RuntimeError("LLM failed")
 
     execution = build_execution(
         llm_executor=llm_executor,
-        tool_registry=tool_registry,
-        risk_assessor=risk_assessor,
     )
 
     request = ExecutionRequest(
@@ -173,6 +183,8 @@ async def test_agent_execution_does_not_retry_or_recover_inside_execution_bounda
     result = await execution.execute(request)
 
     assert result.success is False
+    assert result.output is None
+    assert result.error is not None
     assert llm_executor.execute.await_count == 1
 
     assert not hasattr(execution, "retry")
@@ -193,7 +205,9 @@ async def test_agent_execution_keeps_concurrent_requests_isolated():
 
     llm_executor.execute.side_effect = generate
 
-    execution = build_execution(llm_executor=llm_executor)
+    execution = build_execution(
+        llm_executor=llm_executor,
+    )
 
     request_a = ExecutionRequest(
         step_id=1,
@@ -232,8 +246,8 @@ async def test_agent_execution_keeps_concurrent_requests_isolated():
     assert forwarded_a.context is request_a.context
     assert forwarded_b.context is request_b.context
 
-    assert forwarded_a.metadata is request_a.metadata
-    assert forwarded_b.metadata is request_b.metadata
+    assert forwarded_a.metadata is not request_a.metadata
+    assert forwarded_b.metadata is not request_b.metadata
 
     assert forwarded_a.user_request != forwarded_b.user_request
     assert forwarded_a.action != forwarded_b.action
@@ -244,7 +258,9 @@ async def test_agent_execution_failure_does_not_fake_success():
     llm_executor = AsyncMock()
     llm_executor.execute.side_effect = RuntimeError("model unavailable")
 
-    execution = build_execution(llm_executor=llm_executor)
+    execution = build_execution(
+        llm_executor=llm_executor,
+    )
 
     request = ExecutionRequest(
         step_id=11,
@@ -259,7 +275,6 @@ async def test_agent_execution_failure_does_not_fake_success():
 
     assert result.success is False
     assert result.output is None
-
+    assert result.error is not None
     assert result.success is not True
     assert llm_executor.execute.await_count == 1
-    

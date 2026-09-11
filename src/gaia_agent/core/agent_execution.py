@@ -677,7 +677,7 @@ class AgentExecution:
 
     def _failure_result(
         self,
-        request: ExecutionRequest,
+        request: ExecutionRequest | None,
         error: AgentError,
     ) -> ExecutionResult:
         self._emit(
@@ -694,8 +694,8 @@ class AgentExecution:
                 error.category
                 is ErrorCategory.APPROVAL_BLOCKED
             ),
-            step_id=request.step_id,
-            tool_name=request.tool_name,
+            step_id=request.step_id if isinstance(request, ExecutionRequest) else None,
+            tool_name=request.tool_name if isinstance(request, ExecutionRequest) else None,
             metadata={
                 "execution_type": (
                     "tool"
@@ -710,7 +710,7 @@ class AgentExecution:
     def _emit(
         self,
         event_type: EventType,
-        request: ExecutionRequest,
+        request: ExecutionRequest | None,
         *,
         error: AgentError | None = None,
         metadata: dict[str, Any] | None = None,
@@ -718,21 +718,36 @@ class AgentExecution:
         if self.event_logger is None:
             return
 
-        event_metadata = {
-            "step_id": request.step_id,
-            "action": request.action,
-        }
+        event_metadata: dict[str, Any] = {}
+
+        if isinstance(request, ExecutionRequest):
+            event_metadata.update(
+                {
+                    "step_id": request.step_id,
+                    "action": request.action,
+                }
+            )
 
         if metadata:
             event_metadata.update(metadata)
+
+        if error is not None:
+            event_metadata["error_type"] = error.error_type
+            event_metadata["error_category"] = error.category.value
+            event_metadata["error_message"] = error.message
 
         event = create_event(
             event_type=event_type,
             correlation_id=(
                 request.correlation_id
-                or self.correlation_id
+                if isinstance(request, ExecutionRequest) and request.correlation_id is not None
+                else self.correlation_id
             ),
-            iteration=request.iteration,
+            iteration=(
+                request.iteration
+                if isinstance(request, ExecutionRequest)
+                else 0
+            ),
             metadata=event_metadata,
             error=(
                 error.message
@@ -844,8 +859,11 @@ class AgentExecution:
 
     @staticmethod
     def _is_tool_step(
-        request: ExecutionRequest,
+        request: ExecutionRequest | None,
     ) -> bool:
+        if not isinstance(request, ExecutionRequest):
+            return False
+
         value = getattr(
             request.step_type,
             "value",
@@ -856,8 +874,11 @@ class AgentExecution:
 
     @staticmethod
     def _is_llm_step(
-        request: ExecutionRequest,
+        request: ExecutionRequest | None,
     ) -> bool:
+        if not isinstance(request, ExecutionRequest):
+            return False
+
         value = getattr(
             request.step_type,
             "value",

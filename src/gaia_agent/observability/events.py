@@ -12,6 +12,10 @@ class EventType(str, Enum):
     AGENT_COMPLETED = "agent_completed"
     AGENT_FAILED = "agent_failed"
 
+    EXECUTION_STARTED = "execution_started"
+    EXECUTION_COMPLETED = "execution_completed"
+    EXECUTION_FAILED = "execution_failed"
+
     LLM_REQUEST_STARTED = "llm_request_started"
     LLM_REQUEST_COMPLETED = "llm_request_completed"
     LLM_REQUEST_FAILED = "llm_request_failed"
@@ -35,7 +39,6 @@ class ObservabilityEvent:
     )
 
     metadata: dict[str, Any] = field(default_factory=dict)
-
     agent_id: UUID | None = None
     iteration: int | None = None
     latency: float | None = None

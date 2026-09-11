@@ -160,7 +160,8 @@ async def test_agent_execution_llm_boundary_preserves_request_identity_without_a
     )
 
     assert forwarded.context is request.context
-    assert forwarded.metadata is request.metadata
+    assert forwarded.metadata == request.metadata
+    assert forwarded.metadata is not request.metadata
 
     assert forwarded.user_request == "Explain RAG"
     assert forwarded.action == "Answer"
@@ -172,7 +173,11 @@ async def test_agent_execution_rejects_non_execution_request():
 
     execution = build_execution(llm_executor)
 
-    with pytest.raises(Exception):
-        await execution.execute(object())
+    fake_state = object()
+
+    result = await execution.execute(fake_state)
+
+    assert result.success is False
+    assert result.error is not None
 
     llm_executor.execute.assert_not_awaited()
