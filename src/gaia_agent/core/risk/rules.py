@@ -4,21 +4,24 @@ from gaia_agent.core.risk.models import (
     RiskContext,
     RiskFactor,
 )
-from gaia_agent.planner.tool_spec import (
-    TOOL_CAPABILITIES,
-    ToolCapability,
-)
+from gaia_agent.planner.tool_spec import ToolCapability
+from gaia_agent.tools.registry import ToolRegistry
 
 
 class RiskRules:
+    def __init__(
+        self,
+        tool_registry: ToolRegistry | None = None,
+    ) -> None:
+        self.tool_registry = tool_registry
 
     def analyze(
         self,
         context: RiskContext,
     ) -> set[RiskFactor]:
-
         action = context.action.lower().strip()
         tool = (context.tool_name or "").lower().strip()
+
         arguments = {
             str(key).lower()
             for key in context.arguments
@@ -52,12 +55,28 @@ class RiskRules:
 
         return factors
 
+    def capability_for(
+        self,
+        tool_name: str | None,
+    ) -> ToolCapability | None:
+        if self.tool_registry is None:
+            return None
+
+        if not tool_name:
+            return None
+
+        try:
+            return self.tool_registry.get_spec(
+                tool_name.strip()
+            ).capability
+        except (KeyError, ValueError):
+            return None
+
     def _is_destructive(
         self,
         action: str,
         tool: str,
     ) -> bool:
-
         destructive_actions = {
             "delete",
             "destroy",
@@ -88,7 +107,6 @@ class RiskRules:
         self,
         action: str,
     ) -> bool:
-
         modification_actions = {
             "update",
             "modify",
@@ -110,7 +128,6 @@ class RiskRules:
         action: str,
         arguments: set[str],
     ) -> bool:
-
         financial_keywords = {
             "payment",
             "pay",
@@ -148,12 +165,7 @@ class RiskRules:
         action: str,
         tool: str,
     ) -> bool:
-
-        # Phase 8: capability-aware. Read-only / computation /
-        # network-read tools (web_search, file_reader, analyze_image,
-        # analyze_excel, python_interpreter, youtube_transcript) never
-        # create external side effects and must NOT be blocked.
-        capability = TOOL_CAPABILITIES.get(tool)
+        capability = self.capability_for(tool)
 
         if capability in {
             ToolCapability.READ_ONLY,
@@ -193,7 +205,6 @@ class RiskRules:
         action: str,
         arguments: set[str],
     ) -> bool:
-
         privacy_keywords = {
             "password",
             "email",
@@ -231,7 +242,6 @@ class RiskRules:
         action: str,
         tool: str,
     ) -> bool:
-
         security_keywords = {
             "permission",
             "permissions",
@@ -262,7 +272,6 @@ class RiskRules:
         self,
         action: str,
     ) -> bool:
-
         legal_keywords = {
             "legal",
             "contract",
@@ -282,7 +291,6 @@ class RiskRules:
         self,
         action: str,
     ) -> bool:
-
         reputational_keywords = {
             "public statement",
             "official statement",

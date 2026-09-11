@@ -7,17 +7,13 @@ from gaia_agent.core.risk.models import (
     RiskFactor,
     RiskLevel,
 )
-from gaia_agent.planner.tool_spec import (
-    TOOL_CAPABILITIES,
-    ToolCapability,
-)
+from gaia_agent.planner.tool_spec import ToolCapability
 
 from .analyzer import RiskAnalyzer
 from .rules import RiskRules
 
 
 class RiskAssessor:
-
     def __init__(
         self,
         rules: RiskRules,
@@ -30,25 +26,25 @@ class RiskAssessor:
         self,
         context: RiskContext,
     ) -> RiskAssessment:
-
         rule_factors = self.rules.analyze(context)
 
-        # Deterministic-first risk assessment (analysis item #8): the LLM
-        # analyzer costs a full structured-output generation per tool step,
-        # which dominates latency on local models. Only consult it when the
-        # deterministic rules cannot classify the action at all (unknown
-        # tool, no risk factors, no declared capability).
-        rule_level = self._level_from_rules(rule_factors)
-
-        capability = TOOL_CAPABILITIES.get(
-            (context.tool_name or "").lower().strip()
+        rule_level = self._level_from_rules(
+            rule_factors
         )
 
-        skip_llm = rule_level is not None or capability in {
-            ToolCapability.READ_ONLY,
-            ToolCapability.COMPUTATION,
-            ToolCapability.NETWORK_READ,
-        }
+        capability = self.rules.capability_for(
+            context.tool_name
+        )
+
+        skip_llm = (
+            rule_level is not None
+            or capability
+            in {
+                ToolCapability.READ_ONLY,
+                ToolCapability.COMPUTATION,
+                ToolCapability.NETWORK_READ,
+            }
+        )
 
         llm_analysis: RiskAnalysis | None = None
 
@@ -58,7 +54,6 @@ class RiskAssessor:
                     context
                 )
             except Exception:
-
                 llm_analysis = None
 
         factors = self._merge_factors(
@@ -98,7 +93,6 @@ class RiskAssessor:
         rule_factors: set[RiskFactor],
         llm_analysis: RiskAnalysis | None,
     ) -> set[RiskFactor]:
-
         factors = set(rule_factors)
 
         if llm_analysis is not None:
@@ -112,7 +106,6 @@ class RiskAssessor:
         rule_factors: set[RiskFactor],
         llm_analysis: RiskAnalysis | None,
     ) -> RiskLevel:
-
         rule_level = self._level_from_rules(
             rule_factors
         )
@@ -136,7 +129,6 @@ class RiskAssessor:
     def _risk_rank(
         level: RiskLevel,
     ) -> int:
-
         return {
             RiskLevel.LOW: 0,
             RiskLevel.MEDIUM: 1,
@@ -148,7 +140,6 @@ class RiskAssessor:
         self,
         factors: set[RiskFactor],
     ) -> RiskLevel | None:
-
         if RiskFactor.FINANCIAL in factors:
             return RiskLevel.CRITICAL
 
@@ -181,7 +172,6 @@ class RiskAssessor:
         rule_factors: set[RiskFactor],
         llm_analysis: RiskAnalysis | None,
     ) -> float | None:
-
         if llm_analysis is None:
             return None
 
@@ -192,7 +182,6 @@ class RiskAssessor:
         rule_factors: set[RiskFactor],
         llm_analysis: RiskAnalysis | None,
     ) -> str:
-
         parts: list[str] = []
 
         if rule_factors:
