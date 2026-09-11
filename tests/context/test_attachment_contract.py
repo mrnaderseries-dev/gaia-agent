@@ -48,3 +48,24 @@ def test_attachment_does_not_modify_user_request():
     assert context.user_request == "Analyze the attached report."
     assert "C:\\" not in context.user_request
     assert "report.pdf" not in context.user_request
+
+def test_attachment_is_available_to_planner_context():
+    path = str(Path("evaluation_files/task-123/report.pdf").resolve())
+
+    attachment = Attachment(
+        attachment_id="task-123:report.pdf",
+        filename="report.pdf",
+        path=path,
+    )
+
+    state = AgentState(
+        user_request="Analyze the attached report.",
+        attachments=[attachment],
+    )
+
+    context = ContextRequestBuilder.from_state(state)
+
+    assert len(context.attachments) == 1
+    assert context.attachments[0].attachment_id == "task-123:report.pdf"
+    assert context.attachments[0].filename == "report.pdf"
+    assert context.attachments[0].path == path
