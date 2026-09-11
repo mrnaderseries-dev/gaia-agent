@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+from gaia_agent.context.attachments import Attachment
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +38,7 @@ class ContextRequest:
     tool_result: Any | None = None
 
     tool_error: str | None = None
+    attachments:tuple[Attachment,...]=()
 
 
 @dataclass(slots=True)

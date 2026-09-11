@@ -11,6 +11,7 @@ from gaia_agent.reliability.errors import (
     ErrorCategory,
     ErrorSeverity,
 )
+from gaia_agent.context.attachments import Attachment
 
 
 class AgentPhase(str, Enum):
@@ -62,6 +63,8 @@ class AgentState:
     completed_steps: list[int] = field(
         default_factory=list
     )
+    attachments: list[Attachment] = field(
+    default_factory=list)
 
     current_action: str | None = None
     step_type: StepType | None = None

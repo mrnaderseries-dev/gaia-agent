@@ -11,6 +11,7 @@ class ContextRequestBuilder:
     ) -> ContextRequest:
         return ContextRequest(
             user_request=state.user_request,
+            attachments=tuple(state.attachments),
             plan=list(state.plan),
             current_step=state.current_step,
             completed_steps=list(
