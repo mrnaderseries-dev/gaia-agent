@@ -81,9 +81,7 @@ class AnalyzeExcelTool(Tool):
         self.llm_service = llm_service
         self.base_dir = Path(base_dir).resolve()
 
-    @property
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
+        self._spec = ToolSpec(
             name=self.name,
             description=self.description,
             arguments_schema={
@@ -129,6 +127,10 @@ class AnalyzeExcelTool(Tool):
             allowed_imports=frozenset(),
             function=self.forward,
         )
+
+    @property
+    def spec(self) -> ToolSpec:
+        return self._spec
 
     def _read_excel(
         self,
@@ -418,4 +420,3 @@ class ExcelTools:
                 base_dir=str(self.base_dir),
             )
         ]
-    

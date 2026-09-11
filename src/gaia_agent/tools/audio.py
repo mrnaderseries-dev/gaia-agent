@@ -41,12 +41,6 @@ class STTBackend(Protocol):
 
 
 class FasterWhisperBackend:
-    """
-    Local speech-to-text backend using faster-whisper.
-
-    The Whisper model is loaded lazily on first transcription.
-    """
-
     def __init__(
         self,
         model_size: str = "base",
@@ -125,10 +119,6 @@ class FasterWhisperBackend:
 
 
 class TranscribeAudioTool(Tool):
-    """
-    Transcribe a local audio file into text.
-    """
-
     name = "transcribe_audio"
 
     description = (
@@ -164,9 +154,7 @@ class TranscribeAudioTool(Tool):
         self.stt_backend = stt_backend
         self.base_dir = Path(base_dir).resolve()
 
-    @property
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
+        self._spec = ToolSpec(
             name=self.name,
             description=self.description,
             arguments_schema={
@@ -179,7 +167,7 @@ class TranscribeAudioTool(Tool):
                             "to the allowed base directory "
                             "or filename."
                         ),
-                    },
+                    }
                 },
                 "required": ["audio_path"],
                 "additionalProperties": False,
@@ -202,6 +190,10 @@ class TranscribeAudioTool(Tool):
             allowed_imports=frozenset(),
             function=self.forward,
         )
+
+    @property
+    def spec(self) -> ToolSpec:
+        return self._spec
 
     def forward(
         self,
@@ -298,4 +290,3 @@ class AudioTools:
                 base_dir=str(self.base_dir),
             )
         ]
-    

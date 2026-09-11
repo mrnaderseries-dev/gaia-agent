@@ -72,9 +72,7 @@ class AnalyzeImageTool(Tool):
         self.llm_service = llm_service
         self.base_dir = Path(base_dir).resolve()
 
-    @property
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
+        self._spec = ToolSpec(
             name=self.name,
             description=self.description,
             arguments_schema={
@@ -120,6 +118,10 @@ class AnalyzeImageTool(Tool):
             allowed_imports=frozenset(),
             function=self.forward,
         )
+
+    @property
+    def spec(self) -> ToolSpec:
+        return self._spec
 
     def forward(
         self,
@@ -213,6 +215,7 @@ class AnalyzeImageTool(Tool):
 
         except FileNotFoundError as exc:
             return f"Error: {exc}"
+
         except Exception as exc:
             return (
                 "Error analyzing image: "
