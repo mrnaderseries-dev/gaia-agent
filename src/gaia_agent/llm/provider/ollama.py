@@ -4,11 +4,18 @@ import json
 from typing import Any, Sequence, TypeVar
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from gaia_agent.llm.client import LLMClient, Message
 from gaia_agent.llm.model import LLMModel
 from gaia_agent.llm.usage import TokenTrackerProtocol, TokenUsage
+from gaia_agent.reliability.exception import (
+    AuthenticationError,
+    AuthorizationError,
+    LLMFailure,
+    LLMOutputError,
+    RateLimitError,
+)
 
 T = TypeVar("T")
 
@@ -61,6 +68,7 @@ class OllamaClient(LLMClient):
         response = await self._request(payload)
 
         usage = self._extract_usage(response)
+
         self._track_usage(
             operation=operation,
             usage=usage,
@@ -69,8 +77,8 @@ class OllamaClient(LLMClient):
         message = response.get("message")
 
         if not isinstance(message, dict):
-            raise RuntimeError(
-                "Ollama response does not contain a valid message"
+            raise LLMOutputError(
+                "Ollama response does not contain a valid message."
             )
 
         content = message.get("content", "")
@@ -87,10 +95,6 @@ class OllamaClient(LLMClient):
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """
-        Perform the actual HTTP request to Ollama.
-        """
-
         url = f"{self.base_url}/api/chat"
 
         async with httpx.AsyncClient(
@@ -102,38 +106,65 @@ class OllamaClient(LLMClient):
             )
 
         if response.status_code >= 400:
-            raise RuntimeError(
-                "Ollama request failed "
-                f"({response.status_code}): {response.text}"
-            )
+            self._raise_http_error(response)
 
         try:
             data = response.json()
         except ValueError as exc:
-            raise RuntimeError(
-                "Ollama returned invalid JSON"
+            raise LLMOutputError(
+                "Ollama returned invalid JSON."
             ) from exc
 
         if not isinstance(data, dict):
-            raise RuntimeError(
-                "Ollama returned an invalid response object"
+            raise LLMOutputError(
+                "Ollama returned an invalid response object."
             )
 
         return data
+
+    @staticmethod
+    def _raise_http_error(
+        response: httpx.Response,
+    ) -> None:
+        status = response.status_code
+        message = (
+            f"Ollama request failed "
+            f"({status}): {response.text}"
+        )
+
+        if status == 401:
+            raise AuthenticationError(message)
+
+        if status == 403:
+            raise AuthorizationError(message)
+
+        if status == 429:
+            raise RateLimitError(message)
+
+        if status >= 500 or status == 408:
+            raise LLMFailure(
+                message,
+                retryable=True,
+                recoverable=False,
+            )
+
+        raise LLMFailure(
+            message,
+            retryable=False,
+            recoverable=True,
+        )
 
     def _normalize_message(
         self,
         message: Message,
     ) -> dict[str, Any]:
-        """
-        Normalize application messages into Ollama's message shape.
-        """
-
         role = message.get("role")
         content = message.get("content", "")
 
         if not isinstance(role, str):
-            raise ValueError("Message role must be a string")
+            raise ValueError(
+                "Message role must be a string"
+            )
 
         normalized: dict[str, Any] = {
             "role": role,
@@ -147,7 +178,9 @@ class OllamaClient(LLMClient):
             images = message["images"]
 
             if not isinstance(images, list):
-                raise ValueError("Message images must be a list")
+                raise ValueError(
+                    "Message images must be a list"
+                )
 
             normalized["images"] = images
 
@@ -163,8 +196,6 @@ class OllamaClient(LLMClient):
         self,
         output_schema: type[T],
     ) -> dict[str, Any]:
-      
-
         if not issubclass(output_schema, BaseModel):
             raise TypeError(
                 "output_schema must be a Pydantic BaseModel subclass"
@@ -176,8 +207,6 @@ class OllamaClient(LLMClient):
         self,
         response: dict[str, Any],
     ) -> TokenUsage:
-        
-
         prompt_tokens = self._non_negative_int(
             response.get("prompt_eval_count")
         )
@@ -215,7 +244,6 @@ class OllamaClient(LLMClient):
         operation: str,
         usage: TokenUsage,
     ) -> None:
-
         tracker = self.token_tracker
 
         if tracker is None:
@@ -231,18 +259,16 @@ class OllamaClient(LLMClient):
         content: Any,
         output_schema: type[T],
     ) -> T:
-       
-
         if not isinstance(content, str):
-            raise RuntimeError(
-                "Structured Ollama response content must be a string"
+            raise LLMOutputError(
+                "Structured Ollama response content must be a string."
             )
 
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Ollama returned invalid JSON for structured output"
+            raise LLMOutputError(
+                "Ollama returned invalid JSON for structured output."
             ) from exc
 
         if not issubclass(output_schema, BaseModel):
@@ -250,4 +276,9 @@ class OllamaClient(LLMClient):
                 "output_schema must be a Pydantic BaseModel subclass"
             )
 
-        return output_schema.model_validate(parsed)
+        try:
+            return output_schema.model_validate(parsed)
+        except ValidationError as exc:
+            raise LLMOutputError(
+                "Ollama structured output failed schema validation."
+            ) from exc

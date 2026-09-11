@@ -10,11 +10,11 @@ class AgentRuntimeError(Exception):
         recoverable: bool = False,
     ) -> None:
         super().__init__(message)
-
         self.retryable = retryable
         self.recoverable = recoverable
-class AuthenticationError(AgentRuntimeError):
 
+
+class AuthenticationError(AgentRuntimeError):
     def __init__(
         self,
         message: str = "Authentication failed.",
@@ -24,8 +24,9 @@ class AuthenticationError(AgentRuntimeError):
             retryable=False,
             recoverable=False,
         )
-class AuthorizationError(AgentRuntimeError):
 
+
+class AuthorizationError(AgentRuntimeError):
     def __init__(
         self,
         message: str = "Authorization failed.",
@@ -35,8 +36,9 @@ class AuthorizationError(AgentRuntimeError):
             retryable=False,
             recoverable=False,
         )
-class RateLimitError(AgentRuntimeError):
 
+
+class RateLimitError(AgentRuntimeError):
     def __init__(
         self,
         message: str = "Rate limit exceeded.",
@@ -46,8 +48,21 @@ class RateLimitError(AgentRuntimeError):
             retryable=True,
             recoverable=False,
         )
-class ToolExecutionError(AgentRuntimeError):
 
+
+class NetworkError(AgentRuntimeError):
+    def __init__(
+        self,
+        message: str = "Network operation failed.",
+    ) -> None:
+        super().__init__(
+            message,
+            retryable=True,
+            recoverable=False,
+        )
+
+
+class ToolExecutionError(AgentRuntimeError):
     def __init__(
         self,
         message: str = "Tool execution failed.",
@@ -60,8 +75,9 @@ class ToolExecutionError(AgentRuntimeError):
             retryable=retryable,
             recoverable=recoverable,
         )
-class ModelExecutionError(AgentRuntimeError):
 
+
+class ModelExecutionError(AgentRuntimeError):
     def __init__(
         self,
         message: str = "Model execution failed.",
@@ -74,8 +90,38 @@ class ModelExecutionError(AgentRuntimeError):
             retryable=retryable,
             recoverable=recoverable,
         )
-class ValidationError(AgentRuntimeError):
 
+
+class LLMFailure(AgentRuntimeError):
+    def __init__(
+        self,
+        message: str = "LLM execution failed.",
+        *,
+        retryable: bool = False,
+        recoverable: bool = False,
+    ) -> None:
+        super().__init__(
+            message,
+            retryable=retryable,
+            recoverable=recoverable,
+        )
+
+
+class LLMOutputError(AgentRuntimeError):
+    def __init__(
+        self,
+        message: str = "LLM returned invalid output.",
+        *,
+        recoverable: bool = True,
+    ) -> None:
+        super().__init__(
+            message,
+            retryable=False,
+            recoverable=recoverable,
+        )
+
+
+class ValidationError(AgentRuntimeError):
     def __init__(
         self,
         message: str = "Validation failed.",
@@ -85,19 +131,9 @@ class ValidationError(AgentRuntimeError):
             retryable=False,
             recoverable=False,
         )
-class NetworkError(AgentRuntimeError):
 
-    def __init__(
-        self,
-        message: str = "Network operation failed.",
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=True,
-            recoverable=False,
-        )
+
 class InternalAgentError(AgentRuntimeError):
-
     def __init__(
         self,
         message: str = "Internal agent failure.",
@@ -107,8 +143,9 @@ class InternalAgentError(AgentRuntimeError):
             retryable=False,
             recoverable=False,
         )
-class ContextCompressionError(AgentRuntimeError):
 
+
+class ContextCompressionError(AgentRuntimeError):
     def __init__(
         self,
         message: str = "Context compression failed.",
@@ -122,18 +159,7 @@ class ContextCompressionError(AgentRuntimeError):
         )
 
 
-# ----------------------------------------------------------------------
-# Phase 5 taxonomy: actionable, machine-actionable error types
-# ----------------------------------------------------------------------
-
-
 class ToolArgumentError(AgentRuntimeError):
-    """
-    Raised when tool arguments violate the registered tool contract.
-    Should never reach the underlying tool implementation.
-    Recovery strategy: repair arguments, validate, retry once.
-    """
-
     def __init__(
         self,
         message: str = "Tool argument validation failed.",
@@ -148,11 +174,6 @@ class ToolArgumentError(AgentRuntimeError):
 
 
 class ApprovalBlockedError(AgentRuntimeError):
-    """
-    Raised when an action requires human approval that is not available.
-    Recovery strategy: do not replan; stop and report the block.
-    """
-
     def __init__(
         self,
         message: str = "Action requires human approval.",
@@ -167,11 +188,6 @@ class ApprovalBlockedError(AgentRuntimeError):
 
 
 class PythonSyntaxError(AgentRuntimeError):
-    """
-    Raised when generated python code cannot be compiled.
-    Recovery strategy: do not retry identical code.
-    """
-
     def __init__(
         self,
         message: str = "Python code contains a syntax error.",
@@ -186,13 +202,6 @@ class PythonSyntaxError(AgentRuntimeError):
 
 
 class PythonImportError(AgentRuntimeError):
-    """
-    Raised when generated python code imports a module that is not
-    available inside the controlled sandbox.
-    Recovery strategy: generate sandbox-compatible code or choose
-    another tool.
-    """
-
     def __init__(
         self,
         message: str = "Python code imports an unavailable module.",
@@ -207,11 +216,6 @@ class PythonImportError(AgentRuntimeError):
 
 
 class EmptyResultError(AgentRuntimeError):
-    """
-    Raised when a tool or step produces no usable content.
-    Recovery strategy: replan with a different source of evidence.
-    """
-
     def __init__(
         self,
         message: str = "Tool returned an empty result.",
@@ -226,12 +230,6 @@ class EmptyResultError(AgentRuntimeError):
 
 
 class InvalidResultError(AgentRuntimeError):
-    """
-    Raised when an operation returns a result that fails the
-    registered validator.
-    Recovery strategy: replan with a bounded budget.
-    """
-
     def __init__(
         self,
         message: str = "Operation returned an invalid result.",

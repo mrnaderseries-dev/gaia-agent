@@ -6,13 +6,12 @@ from typing import Any
 from gaia_agent.llm.client import LLMClient
 from gaia_agent.llm.model import LLMModel
 
+
 @dataclass(frozen=True, slots=True)
 class LLMExecutionRequest:
     user_request: str
     action: str
-
     context: Any = None
-
     metadata: dict[str, Any] = field(
         default_factory=dict
     )
@@ -51,8 +50,6 @@ class LLMExecutor:
         self,
         request: LLMExecutionRequest,
     ) -> str:
-       
-
         self._validate_request(request)
 
         messages = self._build_messages(
@@ -62,14 +59,15 @@ class LLMExecutor:
         response = await self.client.generate(
             messages=messages,
             model=self.model,
+            operation="llm.execute",
         )
 
         return self._extract_text(response)
+
     @staticmethod
     def _validate_request(
         request: LLMExecutionRequest,
     ) -> None:
-
         if not isinstance(
             request,
             LLMExecutionRequest,
@@ -88,11 +86,11 @@ class LLMExecutor:
             raise ValueError(
                 "action cannot be empty."
             )
+
     @staticmethod
     def _build_messages(
         request: LLMExecutionRequest,
     ) -> list[dict[str, str]]:
-
         context_text = (
             LLMExecutor._format_context(
                 request.context
@@ -130,6 +128,7 @@ class LLMExecutor:
                 ),
             },
         ]
+
     @staticmethod
     def _format_context(
         context: Any,
@@ -139,10 +138,7 @@ class LLMExecutor:
                 "(No external context is available.)"
             )
 
-        if isinstance(
-            context,
-            str,
-        ):
+        if isinstance(context, str):
             return context
 
         if isinstance(
@@ -160,16 +156,12 @@ class LLMExecutor:
             )
 
         return str(context)
+
     @staticmethod
     def _extract_text(
         response: Any,
     ) -> str:
-
-        if isinstance(
-            response,
-            str,
-        ):
-
+        if isinstance(response, str):
             text = response.strip()
 
             if not text:
@@ -185,11 +177,7 @@ class LLMExecutor:
             None,
         )
 
-        if isinstance(
-            content,
-            str,
-        ):
-
+        if isinstance(content, str):
             text = content.strip()
 
             if not text:
@@ -205,11 +193,7 @@ class LLMExecutor:
             None,
         )
 
-        if isinstance(
-            text,
-            str,
-        ):
-
+        if isinstance(text, str):
             text = text.strip()
 
             if not text:

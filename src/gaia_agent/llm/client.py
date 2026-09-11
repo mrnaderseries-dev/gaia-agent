@@ -8,7 +8,6 @@ from .model import LLMModel
 
 T = TypeVar("T")
 
-
 Message = dict[str, Any]
 
 
@@ -21,7 +20,7 @@ class LLMClient(ABC):
         model: LLMModel,
         output_schema: type[T] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        operation: str = "llm.generate",
         **kwargs: Any,
     ) -> T | str:
-
         raise NotImplementedError

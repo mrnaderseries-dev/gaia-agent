@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from gaia_agent.core.evidence import ArtifactInfo, ToolResultRecord
+from gaia_agent.planner.plan_schema import PlanStep, StepType
 from gaia_agent.reliability.errors import (
     AgentError,
     ErrorCategory,
@@ -12,10 +14,6 @@ from gaia_agent.reliability.errors import (
 
 
 class AgentPhase(str, Enum):
-    """
-    High-level lifecycle phases of the agent.
-    """
-
     IDLE = "idle"
     PLANNING = "planning"
     EXECUTING = "executing"
@@ -26,10 +24,6 @@ class AgentPhase(str, Enum):
 
 
 class TransitionReason(str, Enum):
-    """
-    Why the agent requested a state transition.
-    """
-
     START = "start"
     PLAN_READY = "plan_ready"
     EXECUTION_READY = "execution_ready"
@@ -45,8 +39,6 @@ class TransitionReason(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class StateTransition:
-  
-
     from_phase: AgentPhase
     to_phase: AgentPhase
     reason: TransitionReason
@@ -54,27 +46,75 @@ class StateTransition:
 
 @dataclass
 class AgentState:
-    """
-    Canonical runtime state of the agent.
-
-    AgentState owns:
-        - current lifecycle phase
-        - transition validation
-        - transition history
-        - runtime metadata
-
-    AgentState does NOT own:
-        - retry decisions
-        - recovery decisions
-        - failure classification
-        - tool execution
-        - planning
-        - orchestration
-    """
+    user_request: str = ""
 
     phase: AgentPhase = AgentPhase.IDLE
 
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(
+        default_factory=dict
+    )
+
+    plan: list[PlanStep] = field(
+        default_factory=list
+    )
+
+    current_step: int | None = None
+    completed_steps: list[int] = field(
+        default_factory=list
+    )
+
+    current_action: str | None = None
+    step_type: StepType | None = None
+
+    tool_name: str | None = None
+    tool_arguments: dict[str, Any] = field(
+        default_factory=dict
+    )
+    tool_result: Any = None
+    tool_error: str | None = None
+
+    execution_success: bool = False
+    step_succeeded: bool = False
+    blocked: bool = False
+    waiting_for_approval: bool = False
+
+    iteration: int = 0
+
+    retry_count: int = 0
+    recovery_attempted: bool = False
+    replan_count: int = 0
+
+    loop_salvage_attempted: bool = False
+    same_failure_count: int = 0
+    same_plan_count: int = 0
+    last_failure_key: str | None = None
+
+    final_answer: str | None = None
+    final_answer_ready: bool = False
+    final_answer_verified: bool = False
+    verification_attempts: int = 0
+
+    task_completed: bool = False
+
+    fatal_error: bool = False
+    human_aborted: bool = False
+    explicit_stop: bool = False
+    timed_out: bool = False
+
+    termination_reason: Any = None
+
+    evidence: list[ToolResultRecord] = field(
+        default_factory=list
+    )
+    artifacts: list[ArtifactInfo] = field(
+        default_factory=list
+    )
+    execution_results: list[Any] = field(
+        default_factory=list
+    )
+    messages: list[Any] = field(
+        default_factory=list
+    )
 
     transition_history: list[StateTransition] = field(
         default_factory=list
@@ -91,7 +131,6 @@ class AgentState:
                     AgentPhase.TERMINATED,
                 }
             ),
-
             AgentPhase.PLANNING: frozenset(
                 {
                     AgentPhase.EXECUTING,
@@ -99,7 +138,6 @@ class AgentState:
                     AgentPhase.TERMINATED,
                 }
             ),
-
             AgentPhase.EXECUTING: frozenset(
                 {
                     AgentPhase.VERIFYING,
@@ -107,7 +145,6 @@ class AgentState:
                     AgentPhase.TERMINATED,
                 }
             ),
-
             AgentPhase.VERIFYING: frozenset(
                 {
                     AgentPhase.COMPLETED,
@@ -116,20 +153,17 @@ class AgentState:
                     AgentPhase.TERMINATED,
                 }
             ),
-
             AgentPhase.COMPLETED: frozenset(
                 {
                     AgentPhase.TERMINATED,
                 }
             ),
-
             AgentPhase.FAILED: frozenset(
                 {
                     AgentPhase.PLANNING,
                     AgentPhase.TERMINATED,
                 }
             ),
-
             AgentPhase.TERMINATED: frozenset(),
         },
         init=False,
@@ -142,7 +176,6 @@ class AgentState:
         *,
         reason: TransitionReason,
     ) -> StateTransition:
-
         if not isinstance(new_phase, AgentPhase):
             raise AgentError(
                 error_type="InvalidPhase",
@@ -224,6 +257,7 @@ class AgentState:
         self.transition_history.append(transition)
 
         return transition
+
     def start(self) -> StateTransition:
         return self.transition(
             AgentPhase.PLANNING,
@@ -251,7 +285,9 @@ class AgentState:
     def fail(
         self,
         *,
-        reason: TransitionReason = TransitionReason.EXECUTION_FAILED,
+        reason: TransitionReason = (
+            TransitionReason.EXECUTION_FAILED
+        ),
     ) -> StateTransition:
         return self.transition(
             AgentPhase.FAILED,
