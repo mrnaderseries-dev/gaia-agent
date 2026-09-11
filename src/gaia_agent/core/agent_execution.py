@@ -5,31 +5,12 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from gaia_agent.core.policies.approval import (
-    ApprovalPolicy,
-    ApprovalState,
-)
-from gaia_agent.core.policies.execution import (
-    ExecutionPolicy,
-    ExecutionState,
-)
-from gaia_agent.core.risk.assessor import (
-    RiskAssessor,
-    RiskContext,
-)
-from gaia_agent.core.llm_executor import (
-    LLMExecutionRequest,
-    LLMExecutor,
-)
-from gaia_agent.core.evidence import (
-    ArtifactInfo,
-    ToolResultRecord,
-)
-from gaia_agent.observability.events import (
-    EventLogger,
-    EventType,
-    create_event,
-)
+from gaia_agent.core.evidence import ArtifactInfo, ToolResultRecord
+from gaia_agent.core.llm_executor import LLMExecutionRequest, LLMExecutor
+from gaia_agent.core.policies.approval import ApprovalPolicy, ApprovalState
+from gaia_agent.core.policies.execution import ExecutionPolicy, ExecutionState
+from gaia_agent.core.risk.assessor import RiskAssessor, RiskContext
+from gaia_agent.observability.events import EventLogger, EventType, create_event
 from gaia_agent.observability.metrics import Metrics
 from gaia_agent.observability.token_tracker import TokenTracker
 from gaia_agent.observability.tracer import Tracer
@@ -102,9 +83,9 @@ class AgentExecution:
         self,
         request: ExecutionRequest,
     ) -> ExecutionResult:
-        self._validate_request(request)
-
         try:
+            self._validate_request(request)
+
             await self._check_execution_policy(request)
 
             risk_assessment = await self._check_risk(request)
@@ -122,10 +103,7 @@ class AgentExecution:
 
             raise AgentError(
                 error_type="UnsupportedStepType",
-                message=(
-                    f"Unsupported step type: "
-                    f"{request.step_type}"
-                ),
+                message=f"Unsupported step type: {request.step_type}",
                 category=ErrorCategory.VALIDATION,
                 severity=ErrorSeverity.HIGH,
                 retryable=False,
@@ -138,15 +116,36 @@ class AgentExecution:
                 },
             )
 
-        except AgentError:
-            raise
+        except AgentError as error:
+            return self._failure_result(
+                request,
+                error,
+            )
 
         except Exception as exc:
-            raise self.error_handler.handle(
+            error = self.error_handler.handle(
                 exc,
                 source="AgentExecution",
                 operation="execute",
-            ) from exc
+            )
+
+            if not isinstance(error, AgentError):
+                error = AgentError(
+                    error_type=type(exc).__name__,
+                    message=str(exc) or type(exc).__name__,
+                    category=ErrorCategory.INTERNAL,
+                    severity=ErrorSeverity.HIGH,
+                    retryable=False,
+                    recoverable=False,
+                    source="AgentExecution",
+                    operation="execute",
+                    original_exception=exc,
+                )
+
+            return self._failure_result(
+                request,
+                error,
+            )
 
     async def _check_execution_policy(
         self,
@@ -174,9 +173,7 @@ class AgentExecution:
         except Exception as exc:
             raise AgentError(
                 error_type="ExecutionPolicyFailure",
-                message=(
-                    f"Execution policy failed: {exc}"
-                ),
+                message=f"Execution policy failed: {exc}",
                 category=ErrorCategory.INTERNAL,
                 severity=ErrorSeverity.HIGH,
                 retryable=False,
@@ -217,7 +214,7 @@ class AgentExecution:
         context = RiskContext(
             action=request.action,
             tool_name=request.tool_name,
-            arguments=request.arguments,
+            arguments=dict(request.arguments),
         )
 
         try:
@@ -236,9 +233,7 @@ class AgentExecution:
         except Exception as exc:
             raise AgentError(
                 error_type="RiskAssessmentFailure",
-                message=(
-                    f"Risk assessment failed: {exc}"
-                ),
+                message=f"Risk assessment failed: {exc}",
                 category=ErrorCategory.INTERNAL,
                 severity=ErrorSeverity.HIGH,
                 retryable=False,
@@ -273,15 +268,17 @@ class AgentExecution:
             if inspect.isawaitable(decision):
                 decision = await decision
 
+            required = self._approval_required(
+                decision
+            )
+
         except AgentError:
             raise
 
         except Exception as exc:
             raise AgentError(
                 error_type="ApprovalPolicyFailure",
-                message=(
-                    f"Approval policy failed: {exc}"
-                ),
+                message=f"Approval policy failed: {exc}",
                 category=ErrorCategory.INTERNAL,
                 severity=ErrorSeverity.HIGH,
                 retryable=False,
@@ -291,7 +288,7 @@ class AgentExecution:
                 original_exception=exc,
             ) from exc
 
-        if self._approval_required(decision):
+        if required:
             raise AgentError(
                 error_type="ApprovalBlocked",
                 message=(
@@ -317,7 +314,9 @@ class AgentExecution:
         self,
         request: ExecutionRequest,
     ) -> ExecutionResult:
-        if not request.tool_name:
+        tool_name = request.tool_name
+
+        if not tool_name:
             raise AgentError(
                 error_type="MissingToolName",
                 message=(
@@ -331,8 +330,6 @@ class AgentExecution:
                 source="AgentExecution",
                 operation="execute_tool",
             )
-
-        tool_name = request.tool_name
 
         span = self.tracer.start_span(
             operation=f"tool.{tool_name}",
@@ -357,6 +354,7 @@ class AgentExecution:
                 tool = self.tool_registry.get(
                     tool_name
                 )
+
             except KeyError as exc:
                 raise AgentError(
                     error_type="ToolNotFound",
@@ -377,7 +375,7 @@ class AgentExecution:
                 ) from exc
 
             result = tool.execute(
-                **request.arguments
+                dict(request.arguments)
             )
 
             if inspect.isawaitable(result):
@@ -402,11 +400,9 @@ class AgentExecution:
                     },
                 )
 
-            execution_result = (
-                self._build_tool_result(
-                    request,
-                    result,
-                )
+            execution_result = self._build_tool_result(
+                request,
+                result,
             )
 
             self._increment("tool_successes")
@@ -504,7 +500,7 @@ class AgentExecution:
                 user_request=request.user_request,
                 action=request.action,
                 context=request.context,
-                metadata=request.metadata,
+                metadata=dict(request.metadata),
             )
 
             output = await self.llm_executor.execute(
@@ -533,9 +529,7 @@ class AgentExecution:
             if not output.strip():
                 raise AgentError(
                     error_type="EmptyResult",
-                    message=(
-                        "LLM returned an empty result."
-                    ),
+                    message="LLM returned an empty result.",
                     category=ErrorCategory.EMPTY_RESULT,
                     severity=ErrorSeverity.MEDIUM,
                     retryable=True,
@@ -616,16 +610,8 @@ class AgentExecution:
         request: ExecutionRequest,
         result: Any,
     ) -> ExecutionResult:
-        evidence: tuple[
-            ToolResultRecord,
-            ...,
-        ] = ()
-
-        artifacts: tuple[
-            ArtifactInfo,
-            ...,
-        ] = ()
-
+        evidence: tuple[ToolResultRecord, ...] = ()
+        artifacts: tuple[ArtifactInfo, ...] = ()
         output = result
         metadata: dict[str, Any] = {}
 
@@ -689,6 +675,38 @@ class AgentExecution:
             metadata=metadata,
         )
 
+    def _failure_result(
+        self,
+        request: ExecutionRequest,
+        error: AgentError,
+    ) -> ExecutionResult:
+        self._emit(
+            EventType.EXECUTION_FAILED,
+            request,
+            error=error,
+        )
+
+        return ExecutionResult(
+            success=False,
+            output=None,
+            error=error,
+            blocked=(
+                error.category
+                is ErrorCategory.APPROVAL_BLOCKED
+            ),
+            step_id=request.step_id,
+            tool_name=request.tool_name,
+            metadata={
+                "execution_type": (
+                    "tool"
+                    if self._is_tool_step(request)
+                    else "llm"
+                    if self._is_llm_step(request)
+                    else "unknown"
+                ),
+            },
+        )
+
     def _emit(
         self,
         event_type: EventType,
@@ -700,6 +718,14 @@ class AgentExecution:
         if self.event_logger is None:
             return
 
+        event_metadata = {
+            "step_id": request.step_id,
+            "action": request.action,
+        }
+
+        if metadata:
+            event_metadata.update(metadata)
+
         event = create_event(
             event_type=event_type,
             correlation_id=(
@@ -707,15 +733,7 @@ class AgentExecution:
                 or self.correlation_id
             ),
             iteration=request.iteration,
-            metadata={
-                "step_id": request.step_id,
-                "action": request.action,
-                **(
-                    metadata
-                    if metadata
-                    else {}
-                ),
-            },
+            metadata=event_metadata,
             error=(
                 error.message
                 if error is not None
@@ -757,8 +775,11 @@ class AgentExecution:
             None,
         )
 
-        if allowed is not None:
-            return bool(allowed)
+        if isinstance(allowed, bool):
+            return allowed
+
+        if allowed is None:
+            return True
 
         return False
 
@@ -769,16 +790,45 @@ class AgentExecution:
         if decision is None:
             return False
 
+        if isinstance(decision, bool):
+            return decision
+
         approval_required = getattr(
             decision,
             "approval_required",
             None,
         )
 
-        if approval_required is not None:
-            return bool(approval_required)
+        if approval_required is None:
+            return False
 
-        return False
+        if not isinstance(
+            approval_required,
+            bool,
+        ):
+            raise AgentError(
+                error_type="InvalidApprovalDecision",
+                message=(
+                    "Approval decision must expose "
+                    "a boolean approval_required value."
+                ),
+                category=ErrorCategory.VALIDATION,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="AgentExecution",
+                operation="check_approval",
+                details={
+                    "decision_type": (
+                        type(decision).__name__
+                    ),
+                    "approval_required_type": (
+                        type(approval_required).__name__
+                    ),
+                },
+            )
+
+        return approval_required
 
     @staticmethod
     def _is_empty_result(
@@ -835,6 +885,21 @@ class AgentExecution:
                 operation="validate_request",
             )
 
+        if not isinstance(
+            request.step_id,
+            int,
+        ):
+            raise AgentError(
+                error_type="InvalidStepId",
+                message="step_id must be an integer.",
+                category=ErrorCategory.VALIDATION,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="AgentExecution",
+                operation="validate_request",
+            )
+
         if request.step_id < 0:
             raise AgentError(
                 error_type="InvalidStepId",
@@ -847,7 +912,25 @@ class AgentExecution:
                 operation="validate_request",
             )
 
-        if not isinstance(request.action, str):
+        if not isinstance(
+            request.step_type,
+            StepType,
+        ):
+            raise AgentError(
+                error_type="InvalidStepType",
+                message="step_type must be a StepType.",
+                category=ErrorCategory.VALIDATION,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="AgentExecution",
+                operation="validate_request",
+            )
+
+        if not isinstance(
+            request.action,
+            str,
+        ):
             raise AgentError(
                 error_type="InvalidAction",
                 message="Execution action must be a string.",
@@ -882,9 +965,68 @@ class AgentExecution:
                     "be a dictionary."
                 ),
                 category=ErrorCategory.TOOL_ARGUMENT_ERROR,
-                severity=ErrorSeverity.LOW,
+                severity=ErrorSeverity.HIGH,
                 retryable=False,
                 recoverable=True,
                 source="AgentExecution",
                 operation="validate_request",
             )
+
+        if not isinstance(
+            request.metadata,
+            dict,
+        ):
+            raise AgentError(
+                error_type="InvalidMetadata",
+                message="Execution metadata must be a dictionary.",
+                category=ErrorCategory.VALIDATION,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=True,
+                source="AgentExecution",
+                operation="validate_request",
+            )
+
+        if request.step_type is StepType.TOOL:
+            if not isinstance(
+                request.tool_name,
+                str,
+            ):
+                raise AgentError(
+                    error_type="MissingToolName",
+                    message="Tool step requires a tool name.",
+                    category=ErrorCategory.TOOL_ARGUMENT_ERROR,
+                    severity=ErrorSeverity.HIGH,
+                    retryable=False,
+                    recoverable=True,
+                    source="AgentExecution",
+                    operation="validate_request",
+                )
+
+            if not request.tool_name.strip():
+                raise AgentError(
+                    error_type="EmptyToolName",
+                    message="Tool name cannot be empty.",
+                    category=ErrorCategory.TOOL_ARGUMENT_ERROR,
+                    severity=ErrorSeverity.HIGH,
+                    retryable=False,
+                    recoverable=True,
+                    source="AgentExecution",
+                    operation="validate_request",
+                )
+
+        if request.step_type is StepType.LLM:
+            if request.tool_name is not None:
+                raise AgentError(
+                    error_type="InvalidLLMToolBinding",
+                    message=(
+                        "LLM execution cannot specify "
+                        "a tool name."
+                    ),
+                    category=ErrorCategory.VALIDATION,
+                    severity=ErrorSeverity.HIGH,
+                    retryable=False,
+                    recoverable=False,
+                    source="AgentExecution",
+                    operation="validate_request",
+                )

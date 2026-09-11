@@ -1,4 +1,4 @@
-[11/09/2026 3:33 PM] 27309: from future import annotations
+from __future__ import annotations
 
 import inspect
 from typing import Any
@@ -22,7 +22,7 @@ from .web import WebTools
 
 
 class RegisteredTool:
-    def init(
+    def __init__(
         self,
         tool: Any,
         spec: ToolSpec,
@@ -121,7 +121,7 @@ class RegisteredTool:
 
 
 class ToolRegistry:
-    def init(
+    def __init__(
         self,
         base_dir: str = ".",
         *,
@@ -162,7 +162,7 @@ class ToolRegistry:
         file_tools = FileTools(
             base_dir=self.base_dir,
         )
-[11/09/2026 3:33 PM] 27309: audio_tools = AudioTools(
+        audio_tools = AudioTools(
             stt_backend=self.stt_backend,
             base_dir=self.base_dir,
             stt_model_size=self.stt_model_size,
@@ -337,7 +337,8 @@ class ToolRegistry:
         return list(
             self._tools_by_name.values()
         )
-[11/09/2026 3:33 PM] 27309: def validate_step(
+
+    def validate_step(
         self,
         step: Any,
     ) -> dict[str, Any]:
