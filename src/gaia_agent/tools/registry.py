@@ -1,4 +1,4 @@
-from __future__ import annotations
+[11/09/2026 3:33 PM] 27309: from future import annotations
 
 import inspect
 from typing import Any
@@ -22,7 +22,7 @@ from .web import WebTools
 
 
 class RegisteredTool:
-    def __init__(
+    def init(
         self,
         tool: Any,
         spec: ToolSpec,
@@ -37,20 +37,24 @@ class RegisteredTool:
                 "Registered tool spec must be a ToolSpec."
             )
 
-        tool_name = getattr(tool, "name", None)
+        tool_name = getattr(
+            tool,
+            "name",
+            None,
+        )
 
         if (
             not isinstance(tool_name, str)
             or not tool_name.strip()
         ):
             raise ValueError(
-                "Every registered tool must have a "
-                "non-empty name."
+                "Every registered tool must have "
+                "a non-empty name."
             )
 
         if tool_name != spec.name:
             raise ValueError(
-                f"Tool/spec name mismatch: "
+                "Tool/spec name mismatch: "
                 f"implementation='{tool_name}', "
                 f"spec='{spec.name}'."
             )
@@ -75,8 +79,8 @@ class RegisteredTool:
         self,
         **arguments: Any,
     ) -> Any:
-        validated_arguments = self.validate_arguments(
-            arguments
+        validated_arguments = (
+            self.validate_arguments(arguments)
         )
 
         result = self.spec.function(
@@ -92,9 +96,11 @@ class RegisteredTool:
         self,
         arguments: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        return ToolContractValidator.validate_arguments(
-            spec=self.spec,
-            arguments=arguments,
+        return (
+            ToolContractValidator.validate_arguments(
+                spec=self.spec,
+                arguments=arguments,
+            )
         )
 
     def supports_modality(
@@ -115,7 +121,7 @@ class RegisteredTool:
 
 
 class ToolRegistry:
-    def __init__(
+    def init(
         self,
         base_dir: str = ".",
         *,
@@ -156,8 +162,7 @@ class ToolRegistry:
         file_tools = FileTools(
             base_dir=self.base_dir,
         )
-
-        audio_tools = AudioTools(
+[11/09/2026 3:33 PM] 27309: audio_tools = AudioTools(
             stt_backend=self.stt_backend,
             base_dir=self.base_dir,
             stt_model_size=self.stt_model_size,
@@ -200,7 +205,11 @@ class ToolRegistry:
                 "Cannot register a None tool."
             )
 
-        spec = getattr(tool, "spec", None)
+        spec = getattr(
+            tool,
+            "spec",
+            None,
+        )
 
         if spec is None:
             raise ValueError(
@@ -314,18 +323,21 @@ class ToolRegistry:
     ) -> ToolSpec:
         return self.get(tool_name).spec
 
-    def get_tool_specs(self) -> list[ToolSpec]:
+    def get_tool_specs(
+        self,
+    ) -> list[ToolSpec]:
         return [
             tool.spec
             for tool in self._tools_by_name.values()
         ]
 
-    def get_tools(self) -> list[RegisteredTool]:
+    def get_tools(
+        self,
+    ) -> list[RegisteredTool]:
         return list(
             self._tools_by_name.values()
         )
-
-    def validate_step(
+[11/09/2026 3:33 PM] 27309: def validate_step(
         self,
         step: Any,
     ) -> dict[str, Any]:
@@ -335,9 +347,11 @@ class ToolRegistry:
             in self._tools_by_name.items()
         }
 
-        return ToolContractValidator.validate_step_contract(
-            step=step,
-            available_tools=specs,
+        return (
+            ToolContractValidator.validate_step_contract(
+                step=step,
+                available_tools=specs,
+            )
         )
 
     def names(self) -> list[str]:

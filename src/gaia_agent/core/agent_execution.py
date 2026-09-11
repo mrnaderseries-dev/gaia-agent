@@ -1,37 +1,46 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from gaia_agent.core.agent_state import AgentPhase
-from gaia_agent.core.policies.execution import ExecutionState, ExecutionPolicy
-from gaia_agent.core.policies.approval import ApprovalState, ApprovalPolicy
-from gaia_agent.core.risk.assessor import RiskContext, RiskAssessor
-from gaia_agent.core.llm_executor import LLMExecutor
-from gaia_agent.tools.registry import ToolRegistry
+from gaia_agent.core.policies.approval import (
+    ApprovalPolicy,
+    ApprovalState,
+)
+from gaia_agent.core.policies.execution import (
+    ExecutionPolicy,
+    ExecutionState,
+)
+from gaia_agent.core.risk.assessor import (
+    RiskAssessor,
+    RiskContext,
+)
+from gaia_agent.core.llm_executor import (
+    LLMExecutionRequest,
+    LLMExecutor,
+)
+from gaia_agent.core.evidence import (
+    ArtifactInfo,
+    ToolResultRecord,
+)
+from gaia_agent.observability.events import (
+    EventLogger,
+    EventType,
+    create_event,
+)
+from gaia_agent.observability.metrics import Metrics
+from gaia_agent.observability.token_tracker import TokenTracker
+from gaia_agent.observability.tracer import Tracer
 from gaia_agent.planner.plan_schema import StepType
-
+from gaia_agent.reliability.error_handler import ErrorHandler
 from gaia_agent.reliability.errors import (
     AgentError,
     ErrorCategory,
     ErrorSeverity,
 )
-from gaia_agent.reliability.error_handler import ErrorHandler
-
-from gaia_agent.observability.events import (
-    EventType,
-    EventLogger,
-    create_event,
-)
-from gaia_agent.observability.metrics import Metrics
-from gaia_agent.observability.tracer import Tracer
-from gaia_agent.observability.token_tracker import TokenTracker
-
-from gaia_agent.core.evidence import (
-    ToolResultRecord,
-    ArtifactInfo,
-)
+from gaia_agent.tools.registry import ToolRegistry
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,16 +49,12 @@ class ExecutionRequest:
     step_type: StepType
     action: str
     tool_name: str | None = None
-    arguments: dict[str, Any] = field(
-        default_factory=dict
-    )
+    arguments: dict[str, Any] = field(default_factory=dict)
     user_request: str = ""
     context: Any = None
     iteration: int = 0
     correlation_id: UUID | None = None
-    metadata: dict[str, Any] = field(
-        default_factory=dict
-    )
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,13 +67,10 @@ class ExecutionResult:
     blocked: bool = False
     step_id: int | None = None
     tool_name: str | None = None
-    metadata: dict[str, Any] = field(
-        default_factory=dict
-    )
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentExecution:
-
     def __init__(
         self,
         *,
@@ -84,7 +86,6 @@ class AgentExecution:
         error_handler: ErrorHandler,
         correlation_id: UUID,
     ) -> None:
-
         self.tool_registry = tool_registry
         self.execution_policy = execution_policy
         self.risk_assessor = risk_assessor
@@ -101,18 +102,12 @@ class AgentExecution:
         self,
         request: ExecutionRequest,
     ) -> ExecutionResult:
-
         self._validate_request(request)
 
         try:
+            await self._check_execution_policy(request)
 
-            await self._check_execution_policy(
-                request
-            )
-
-            risk_assessment = await self._check_risk(
-                request
-            )
+            risk_assessment = await self._check_risk(request)
 
             await self._check_approval(
                 request,
@@ -120,14 +115,10 @@ class AgentExecution:
             )
 
             if self._is_tool_step(request):
-                return await self._execute_tool(
-                    request
-                )
+                return await self._execute_tool(request)
 
             if self._is_llm_step(request):
-                return await self._execute_llm(
-                    request
-                )
+                return await self._execute_llm(request)
 
             raise AgentError(
                 error_type="UnsupportedStepType",
@@ -143,9 +134,7 @@ class AgentExecution:
                 operation="execute",
                 details={
                     "step_id": request.step_id,
-                    "step_type": str(
-                        request.step_type
-                    ),
+                    "step_type": str(request.step_type),
                 },
             )
 
@@ -153,7 +142,6 @@ class AgentExecution:
             raise
 
         except Exception as exc:
-
             raise self.error_handler.handle(
                 exc,
                 source="AgentExecution",
@@ -164,7 +152,6 @@ class AgentExecution:
         self,
         request: ExecutionRequest,
     ) -> None:
-
         execution_state = ExecutionState(
             step_type=request.step_type,
             tool_name=request.tool_name,
@@ -174,22 +161,17 @@ class AgentExecution:
         )
 
         try:
-
-            decision = self.execution_policy.check(
+            decision = self.execution_policy.evaluate(
                 execution_state
             )
 
-            if hasattr(
-                decision,
-                "await",
-            ):
+            if inspect.isawaitable(decision):
                 decision = await decision
 
         except AgentError:
             raise
 
         except Exception as exc:
-
             raise AgentError(
                 error_type="ExecutionPolicyFailure",
                 message=(
@@ -204,12 +186,7 @@ class AgentExecution:
                 original_exception=exc,
             ) from exc
 
-        allowed = self._decision_allowed(
-            decision
-        )
-
-        if not allowed:
-
+        if not self._decision_allowed(decision):
             raise AgentError(
                 error_type="ExecutionBlocked",
                 message=(
@@ -234,26 +211,21 @@ class AgentExecution:
         self,
         request: ExecutionRequest,
     ) -> Any:
-
         if self.risk_assessor is None:
             return None
 
         context = RiskContext(
-            action_name=request.action,
+            action=request.action,
             tool_name=request.tool_name,
             arguments=request.arguments,
         )
 
         try:
-
             result = self.risk_assessor.assess(
                 context
             )
 
-            if hasattr(
-                result,
-                "await",
-            ):
+            if inspect.isawaitable(result):
                 result = await result
 
             return result
@@ -262,7 +234,6 @@ class AgentExecution:
             raise
 
         except Exception as exc:
-
             raise AgentError(
                 error_type="RiskAssessmentFailure",
                 message=(
@@ -282,8 +253,10 @@ class AgentExecution:
         request: ExecutionRequest,
         risk_assessment: Any,
     ) -> None:
-
         if self.approval_policy is None:
+            return
+
+        if risk_assessment is None:
             return
 
         approval_state = ApprovalState(
@@ -293,22 +266,17 @@ class AgentExecution:
         )
 
         try:
-
             decision = self.approval_policy.evaluate(
                 approval_state
             )
 
-            if hasattr(
-                decision,
-                "await",
-            ):
+            if inspect.isawaitable(decision):
                 decision = await decision
 
         except AgentError:
             raise
 
         except Exception as exc:
-
             raise AgentError(
                 error_type="ApprovalPolicyFailure",
                 message=(
@@ -323,15 +291,12 @@ class AgentExecution:
                 original_exception=exc,
             ) from exc
 
-        if not self._decision_allowed(
-            decision
-        ):
-
+        if self._approval_required(decision):
             raise AgentError(
                 error_type="ApprovalBlocked",
                 message=(
-                    "Approval policy blocked "
-                    "the requested operation."
+                    "Approval policy requires "
+                    "human approval."
                 ),
                 category=ErrorCategory.APPROVAL_BLOCKED,
                 severity=ErrorSeverity.MEDIUM,
@@ -343,9 +308,7 @@ class AgentExecution:
                     "step_id": request.step_id,
                     "action": request.action,
                     "tool_name": request.tool_name,
-                    "risk": repr(
-                        risk_assessment
-                    ),
+                    "risk": repr(risk_assessment),
                     "decision": repr(decision),
                 },
             )
@@ -354,9 +317,7 @@ class AgentExecution:
         self,
         request: ExecutionRequest,
     ) -> ExecutionResult:
-
         if not request.tool_name:
-
             raise AgentError(
                 error_type="MissingToolName",
                 message=(
@@ -389,18 +350,14 @@ class AgentExecution:
             },
         )
 
-        self._increment(
-            "tool_requests"
-        )
+        self._increment("tool_requests")
 
         try:
-
-            tool = self.tool_registry.get(
-                tool_name
-            )
-
-            if tool is None:
-
+            try:
+                tool = self.tool_registry.get(
+                    tool_name
+                )
+            except KeyError as exc:
                 raise AgentError(
                     error_type="ToolNotFound",
                     message=(
@@ -416,28 +373,17 @@ class AgentExecution:
                     details={
                         "tool_name": tool_name,
                     },
-                )
+                    original_exception=exc,
+                ) from exc
 
-            self._validate_tool_arguments(
-                tool_name,
-                request.arguments,
+            result = tool.execute(
+                **request.arguments
             )
 
-            result = self.tool_registry.execute(
-                tool_name,
-                request.arguments,
-            )
-
-            if hasattr(
-                result,
-                "await",
-            ):
+            if inspect.isawaitable(result):
                 result = await result
 
-            if self._is_empty_result(
-                result
-            ):
-
+            if self._is_empty_result(result):
                 raise AgentError(
                     error_type="EmptyResult",
                     message=(
@@ -463,9 +409,7 @@ class AgentExecution:
                 )
             )
 
-            self._increment(
-                "tool_successes"
-            )
+            self._increment("tool_successes")
 
             self._emit(
                 EventType.TOOL_COMPLETED,
@@ -475,17 +419,12 @@ class AgentExecution:
                 },
             )
 
-            self.tracer.end_span(
-                span
-            )
+            self.tracer.end_span(span)
 
             return execution_result
 
         except AgentError as error:
-
-            self._increment(
-                "tool_failures"
-            )
+            self._increment("tool_failures")
 
             self._emit(
                 EventType.TOOL_FAILED,
@@ -504,7 +443,6 @@ class AgentExecution:
             raise
 
         except Exception as exc:
-
             error = AgentError(
                 error_type=type(exc).__name__,
                 message=(
@@ -524,9 +462,7 @@ class AgentExecution:
                 original_exception=exc,
             )
 
-            self._increment(
-                "tool_failures"
-            )
+            self._increment("tool_failures")
 
             self._emit(
                 EventType.TOOL_FAILED,
@@ -548,7 +484,6 @@ class AgentExecution:
         self,
         request: ExecutionRequest,
     ) -> ExecutionResult:
-
         span = self.tracer.start_span(
             operation="llm.request",
             correlation_id=(
@@ -562,16 +497,9 @@ class AgentExecution:
             request,
         )
 
-        self._increment(
-            "llm_requests"
-        )
+        self._increment("llm_requests")
 
         try:
-
-            from gaia_agent.core.llm_executor import (
-                LLMExecutionRequest,
-            )
-
             llm_request = LLMExecutionRequest(
                 user_request=request.user_request,
                 action=request.action,
@@ -583,8 +511,26 @@ class AgentExecution:
                 llm_request
             )
 
-            if not output or not output.strip():
+            if not isinstance(output, str):
+                raise AgentError(
+                    error_type="InvalidLLMOutput",
+                    message=(
+                        "LLM executor returned "
+                        "a non-string result."
+                    ),
+                    category=ErrorCategory.LLM_OUTPUT_ERROR,
+                    severity=ErrorSeverity.MEDIUM,
+                    retryable=True,
+                    recoverable=True,
+                    source="AgentExecution",
+                    operation="execute_llm",
+                    details={
+                        "step_id": request.step_id,
+                        "output_type": type(output).__name__,
+                    },
+                )
 
+            if not output.strip():
                 raise AgentError(
                     error_type="EmptyResult",
                     message=(
@@ -601,18 +547,14 @@ class AgentExecution:
                     },
                 )
 
-            self._increment(
-                "llm_successes"
-            )
+            self._increment("llm_successes")
 
             self._emit(
                 EventType.LLM_REQUEST_COMPLETED,
                 request,
             )
 
-            self.tracer.end_span(
-                span
-            )
+            self.tracer.end_span(span)
 
             return ExecutionResult(
                 success=True,
@@ -624,10 +566,7 @@ class AgentExecution:
             )
 
         except AgentError as error:
-
-            self._increment(
-                "llm_failures"
-            )
+            self._increment("llm_failures")
 
             self._emit(
                 EventType.LLM_REQUEST_FAILED,
@@ -643,7 +582,6 @@ class AgentExecution:
             raise
 
         except Exception as exc:
-
             error = AgentError(
                 error_type=type(exc).__name__,
                 message=(
@@ -658,9 +596,7 @@ class AgentExecution:
                 original_exception=exc,
             )
 
-            self._increment(
-                "llm_failures"
-            )
+            self._increment("llm_failures")
 
             self._emit(
                 EventType.LLM_REQUEST_FAILED,
@@ -675,92 +611,25 @@ class AgentExecution:
 
             raise error from exc
 
-    def _validate_tool_arguments(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any],
-    ) -> None:
-
-        try:
-
-            validator = getattr(
-                self.tool_registry,
-                "validate_arguments",
-                None,
-            )
-
-            if validator is None:
-                return
-
-            result = validator(
-                tool_name,
-                arguments,
-            )
-
-            if result is False:
-
-                raise AgentError(
-                    error_type="InvalidToolArguments",
-                    message=(
-                        f"Invalid arguments for "
-                        f"tool '{tool_name}'."
-                    ),
-                    category=(
-                        ErrorCategory.TOOL_ARGUMENT_ERROR
-                    ),
-                    severity=ErrorSeverity.LOW,
-                    retryable=False,
-                    recoverable=True,
-                    source="AgentExecution",
-                    operation="validate_tool_arguments",
-                    details={
-                        "tool_name": tool_name,
-                        "arguments": arguments,
-                    },
-                )
-
-        except AgentError:
-            raise
-
-        except Exception as exc:
-
-            raise AgentError(
-                error_type="InvalidToolArguments",
-                message=(
-                    f"Invalid arguments for "
-                    f"tool '{tool_name}': {exc}"
-                ),
-                category=ErrorCategory.TOOL_ARGUMENT_ERROR,
-                severity=ErrorSeverity.LOW,
-                retryable=False,
-                recoverable=True,
-                source="AgentExecution",
-                operation="validate_tool_arguments",
-                original_exception=exc,
-            ) from exc
-
     def _build_tool_result(
         self,
         request: ExecutionRequest,
         result: Any,
     ) -> ExecutionResult:
-
         evidence: tuple[
-            ToolResultRecord, ...
+            ToolResultRecord,
+            ...,
         ] = ()
 
         artifacts: tuple[
-            ArtifactInfo, ...
+            ArtifactInfo,
+            ...,
         ] = ()
 
         output = result
         metadata: dict[str, Any] = {}
 
-        if isinstance(
-            result,
-            dict,
-        ):
-
+        if isinstance(result, dict):
             output = result.get(
                 "output",
                 result.get(
@@ -828,7 +697,6 @@ class AgentExecution:
         error: AgentError | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-
         if self.event_logger is None:
             return
 
@@ -855,15 +723,12 @@ class AgentExecution:
             ),
         )
 
-        self.event_logger.log(
-            event
-        )
+        self.event_logger.log(event)
 
     def _increment(
         self,
         name: str,
     ) -> None:
-
         if self.metrics is None:
             return
 
@@ -880,14 +745,10 @@ class AgentExecution:
     def _decision_allowed(
         decision: Any,
     ) -> bool:
-
         if decision is None:
             return True
 
-        if isinstance(
-            decision,
-            bool,
-        ):
+        if isinstance(decision, bool):
             return decision
 
         allowed = getattr(
@@ -899,14 +760,23 @@ class AgentExecution:
         if allowed is not None:
             return bool(allowed)
 
-        approved = getattr(
+        return False
+
+    @staticmethod
+    def _approval_required(
+        decision: Any,
+    ) -> bool:
+        if decision is None:
+            return False
+
+        approval_required = getattr(
             decision,
-            "approved",
+            "approval_required",
             None,
         )
 
-        if approved is not None:
-            return bool(approved)
+        if approval_required is not None:
+            return bool(approval_required)
 
         return False
 
@@ -914,14 +784,10 @@ class AgentExecution:
     def _is_empty_result(
         result: Any,
     ) -> bool:
-
         if result is None:
             return True
 
-        if isinstance(
-            result,
-            str,
-        ):
+        if isinstance(result, str):
             return not result.strip()
 
         return False
@@ -930,7 +796,6 @@ class AgentExecution:
     def _is_tool_step(
         request: ExecutionRequest,
     ) -> bool:
-
         value = getattr(
             request.step_type,
             "value",
@@ -943,7 +808,6 @@ class AgentExecution:
     def _is_llm_step(
         request: ExecutionRequest,
     ) -> bool:
-
         value = getattr(
             request.step_type,
             "value",
@@ -956,16 +820,13 @@ class AgentExecution:
     def _validate_request(
         request: ExecutionRequest,
     ) -> None:
-
         if not isinstance(
             request,
             ExecutionRequest,
         ):
             raise AgentError(
                 error_type="InvalidExecutionRequest",
-                message=(
-                    "Expected ExecutionRequest."
-                ),
+                message="Expected ExecutionRequest.",
                 category=ErrorCategory.VALIDATION,
                 severity=ErrorSeverity.HIGH,
                 retryable=False,
@@ -977,9 +838,19 @@ class AgentExecution:
         if request.step_id < 0:
             raise AgentError(
                 error_type="InvalidStepId",
-                message=(
-                    "step_id cannot be negative."
-                ),
+                message="step_id cannot be negative.",
+                category=ErrorCategory.VALIDATION,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=True,
+                source="AgentExecution",
+                operation="validate_request",
+            )
+
+        if not isinstance(request.action, str):
+            raise AgentError(
+                error_type="InvalidAction",
+                message="Execution action must be a string.",
                 category=ErrorCategory.VALIDATION,
                 severity=ErrorSeverity.HIGH,
                 retryable=False,
@@ -991,9 +862,7 @@ class AgentExecution:
         if not request.action.strip():
             raise AgentError(
                 error_type="EmptyAction",
-                message=(
-                    "Execution action cannot be empty."
-                ),
+                message="Execution action cannot be empty.",
                 category=ErrorCategory.VALIDATION,
                 severity=ErrorSeverity.HIGH,
                 retryable=False,
