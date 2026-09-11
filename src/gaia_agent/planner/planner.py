@@ -8,6 +8,8 @@ from typing import Any, Sequence
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 os.environ.setdefault("PYTHONUTF8", "1")
 
+from gaia_agent.context.models import FinalContext
+
 from ..reliability.errors import AgentError
 from ..reliability.loop_detector import LoopDetector
 from ..planner.plan_schema import PlanSchema, PlanStep, StepType
@@ -120,7 +122,7 @@ class Planner:
     async def create_plan(
         self,
         user_question: str,
-        context: Sequence[Any] | None = None,
+        context: FinalContext | None = None,
     ) -> PlanSchema:
         self._validate_question(user_question)
         self._current_question = user_question
@@ -162,14 +164,14 @@ class Planner:
             self._validate_generated_plan(fallback, analysis=analysis)
             return fallback
 
-    async def generate_plan(self, user_question: str, context: Sequence[Any] | None = None) -> PlanSchema:
+    async def generate_plan(self, user_question: str, context: FinalContext | None = None) -> PlanSchema:
         return await self.create_plan(user_question=user_question, context=context)
 
     async def replan_step(
         self,
         *,
         user_question: str,
-        context: Sequence[Any] | None,
+        context: FinalContext | None,
         failed_step: PlanStep,
         failure: AgentError,
     ) -> PlanStep:
@@ -186,7 +188,7 @@ class Planner:
     async def replan(
         self,
         user_question: str,
-        context: Sequence[Any] | None,
+        context: FinalContext | None,
         failed_step: PlanStep,
         failure: AgentError,
     ) -> PlanSchema:
@@ -211,7 +213,6 @@ class Planner:
         )
 
         prompt = self._build_replan_prompt(
-
             user_question=user_question,
             context=context,
             failed_step=failed_step,
@@ -273,6 +274,7 @@ class Planner:
             "Unable to construct a valid, meaningfully different recovery plan. "
             f"failed_tool={failed_step.tool_name!r}, failure_type={failure_type!r}"
         )
+
     def _validate_generated_plan(
         self,
         plan: PlanSchema,
@@ -407,13 +409,6 @@ class Planner:
         failed_step: PlanStep,
         failure_type: str,
     ) -> None:
-        """Enforce strategy change for capability/blocked/loop failures.
-
-        Invalid arguments are special: the same tool may be correct after
-        repairing its arguments.  Transient failures should normally be
-        handled by ReliabilityEngine, so Planner does not invent a different
-        capability merely because of a timeout.
-        """
         if failed_step.step_type != StepType.TOOL:
             return
 
@@ -588,7 +583,7 @@ class Planner:
 
         return self._llm_only_plan()
 
-    def _build_initial_prompt(self, *, user_question: str, context: Sequence[Any] | None, analysis: TaskAnalysis) -> str:
+    def _build_initial_prompt(self, *, user_question: str, context: FinalContext | None, analysis: TaskAnalysis) -> str:
         return f"""
 Create an executable PlanSchema for this GAIA task.
 
@@ -633,7 +628,7 @@ RULES:
         self,
         *,
         user_question: str,
-        context: Sequence[Any] | None,
+        context: FinalContext | None,
         failed_step: PlanStep,
         failure: AgentError,
         analysis: TaskAnalysis,
@@ -739,6 +734,7 @@ retrieve -> inspect/extract -> calculate if necessary -> verify -> final
 
 Return only a valid PlanSchema.
 """.strip()
+
     def _format_available_files(self) -> str:
         if not self.available_files:
             return "No local data files were detected."
@@ -759,19 +755,28 @@ Return only a valid PlanSchema.
             ]))
         return "\n\n".join(blocks) or "No valid tools available."
 
-    def _format_context(self, context: Sequence[Any] | None) -> str:
-        if not context:
+    def _format_context(self, context: FinalContext | None) -> str:
+        if context is None or not context.items:
             return "No additional context."
+
         formatted = []
-        for item in list(context)[-self.MAX_CONTEXT_ITEMS:]:
+        for item in context.items[-self.MAX_CONTEXT_ITEMS:]:
             try:
                 if hasattr(item, "model_dump"):
                     item = item.model_dump()
                 elif hasattr(item, "dict"):
                     item = item.dict()
-                formatted.append(json.dumps(item, ensure_ascii=False, default=str))
+
+                formatted.append(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                )
             except Exception:
                 formatted.append(str(item))
+
         return "\n".join(f"- {item}" for item in formatted)
 
     def _normalize_arguments(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -880,6 +885,7 @@ Return only a valid PlanSchema.
                 "arguments": {"file_path": target},
             }
         return None
+
     def _classify(self, question: str) -> TaskAnalysis:
         return self.task_classifier.classify(
             question,
@@ -916,15 +922,36 @@ Return only a valid PlanSchema.
                 return getattr(value, "value", str(value))
         return failure.__class__.__name__
 
-    def _has_successful_evidence(self, context: Sequence[Any] | None) -> bool:
-        if not context:
+    def _has_successful_evidence(self, context: FinalContext | None) -> bool:
+        if context is None or not context.items:
             return False
-        for item in context:
+
+        for item in context.items:
             text = str(item).lower()
-            if any(x in text for x in ("tool_error", "failed", "exception", "error")):
+
+            if any(
+                x in text
+                for x in (
+                    "tool_error",
+                    "failed",
+                    "exception",
+                    "error",
+                )
+            ):
                 continue
-            if any(x in text for x in ("evidence", "source", "search result", "observation", "extracted")):
+
+            if any(
+                x in text
+                for x in (
+                    "evidence",
+                    "source",
+                    "search result",
+                    "observation",
+                    "extracted",
+                )
+            ):
                 return True
+
         return False
 
     def _extract_url(self, text: str) -> str | None:
