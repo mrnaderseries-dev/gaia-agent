@@ -42,7 +42,8 @@ class ToolContractValidator:
                 "arguments must be a mapping"
             )
 
-        schema = spec.arguments_schema or {}
+        # Updated to use arguments_schema to match your tool definition structure
+        schema = getattr(spec, "arguments_schema", None) or {}
 
         if schema.get("type") != "object":
             raise ValueError(

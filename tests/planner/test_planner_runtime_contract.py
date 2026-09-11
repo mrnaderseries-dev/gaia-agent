@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
+from gaia_agent.context.models import FinalContext
 from gaia_agent.planner.plan_schema import (
     PlanSchema,
     PlanStep,
@@ -18,25 +19,20 @@ from gaia_agent.reliability.errors import AgentError
 
 
 def make_tool_specs() -> dict[str, ToolSpec]:
-    """
-    Build real ToolSpec objects.
-
-    Planner runtime validation expects registered tools to expose:
-      - name
-      - arguments_schema
-
-    Using object() here would bypass the real tool contract and cause
-    AttributeError inside ToolContractValidator.
-    """
     return {
         "web_search": ToolSpec(
             name="web_search",
             description="Search the web for factual information.",
             arguments_schema={
-                "query": {
-                    "type": "string",
-                    "description": "Search query",
-                }
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query",
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
             },
             capability=ToolCapability.NETWORK_READ,
         ),
@@ -44,10 +40,15 @@ def make_tool_specs() -> dict[str, ToolSpec]:
             name="visit_webpage",
             description="Visit a webpage URL.",
             arguments_schema={
-                "url": {
-                    "type": "string",
-                    "description": "URL to visit",
-                }
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to visit",
+                    },
+                },
+                "required": ["url"],
+                "additionalProperties": False,
             },
             capability=ToolCapability.NETWORK_READ,
         ),
@@ -55,10 +56,15 @@ def make_tool_specs() -> dict[str, ToolSpec]:
             name="python_interpreter",
             description="Execute Python code.",
             arguments_schema={
-                "code": {
-                    "type": "string",
-                    "description": "Python code to execute",
-                }
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Python code to execute",
+                    },
+                },
+                "required": ["code"],
+                "additionalProperties": False,
             },
             capability=ToolCapability.COMPUTATION,
         ),
@@ -66,10 +72,15 @@ def make_tool_specs() -> dict[str, ToolSpec]:
             name="file_reader",
             description="Read a local file.",
             arguments_schema={
-                "file_path": {
-                    "type": "string",
-                    "description": "Path to the file",
-                }
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file",
+                    },
+                },
+                "required": ["file_path"],
+                "additionalProperties": False,
             },
             capability=ToolCapability.READ_ONLY,
         ),
@@ -77,14 +88,19 @@ def make_tool_specs() -> dict[str, ToolSpec]:
             name="analyze_image",
             description="Analyze an image.",
             arguments_schema={
-                "image_path": {
-                    "type": "string",
-                    "description": "Path to the image",
+                "type": "object",
+                "properties": {
+                    "image_path": {
+                        "type": "string",
+                        "description": "Path to the image",
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "Question about the image",
+                    },
                 },
-                "question": {
-                    "type": "string",
-                    "description": "Question about the image",
-                },
+                "required": ["image_path", "question"],
+                "additionalProperties": False,
             },
             capability=ToolCapability.READ_ONLY,
         ),
@@ -92,10 +108,15 @@ def make_tool_specs() -> dict[str, ToolSpec]:
             name="analyze_excel",
             description="Analyze an Excel workbook.",
             arguments_schema={
-                "file_path": {
-                    "type": "string",
-                    "description": "Path to the workbook",
-                }
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the workbook",
+                    },
+                },
+                "required": ["file_path"],
+                "additionalProperties": False,
             },
             capability=ToolCapability.READ_ONLY,
         ),
@@ -145,10 +166,6 @@ def make_final_step(step_id: int) -> PlanStep:
 
 @pytest.mark.asyncio
 async def test_planner_accepts_valid_llm_plan() -> None:
-    """
-    A valid LLM-generated PlanSchema should pass runtime validation
-    and be returned unchanged.
-    """
     client = AsyncMock()
 
     valid_plan = PlanSchema(
@@ -156,7 +173,9 @@ async def test_planner_accepts_valid_llm_plan() -> None:
             make_tool_step(
                 0,
                 tool_name="web_search",
-                arguments={"query": "GAIA benchmark official website"},
+                arguments={
+                    "query": "GAIA benchmark official website",
+                },
             ),
             make_final_step(1),
         ]
@@ -177,7 +196,7 @@ async def test_planner_accepts_valid_llm_plan() -> None:
     assert result.steps[0].step_type == StepType.TOOL
     assert result.steps[0].tool_name == "web_search"
     assert result.steps[0].arguments == {
-        "query": "GAIA benchmark official website"
+        "query": "GAIA benchmark official website",
     }
 
     assert result.steps[1].step_id == 1
@@ -189,14 +208,6 @@ async def test_planner_accepts_valid_llm_plan() -> None:
 
 @pytest.mark.asyncio
 async def test_planner_recovers_from_plan_missing_final_answer() -> None:
-    """
-    Simulate an LLM returning a malformed PlanSchema that contains
-    a tool step but no final-answer step.
-
-    PlanSchema itself normally prevents construction of this object,
-    so model_construct() is intentionally used here to simulate
-    malformed LLM output reaching Planner validation.
-    """
     client = AsyncMock()
 
     malformed_plan = PlanSchema.model_construct(
@@ -204,7 +215,9 @@ async def test_planner_recovers_from_plan_missing_final_answer() -> None:
             make_tool_step(
                 0,
                 tool_name="web_search",
-                arguments={"query": "GAIA benchmark"},
+                arguments={
+                    "query": "GAIA benchmark",
+                },
             )
         ]
     )
@@ -228,17 +241,11 @@ async def test_planner_recovers_from_plan_missing_final_answer() -> None:
     assert len(finals) == 1
     assert finals[0] == result.steps[-1]
     assert finals[0].step_type == StepType.LLM
-
-    # The malformed LLM plan must not escape the Planner.
     assert result.steps[-1].is_final_answer is True
 
 
 @pytest.mark.asyncio
 async def test_planner_rejects_unknown_tool_and_uses_fallback() -> None:
-    """
-    An unavailable tool must fail validation and must not be returned
-    as part of the final runtime plan.
-    """
     client = AsyncMock()
 
     malformed_plan = PlanSchema.model_construct(
@@ -276,10 +283,6 @@ async def test_planner_rejects_unknown_tool_and_uses_fallback() -> None:
 
 @pytest.mark.asyncio
 async def test_planner_preserves_valid_tool_arguments() -> None:
-    """
-    Runtime validation must preserve arguments that match the
-    registered ToolSpec contract.
-    """
     client = AsyncMock()
 
     valid_plan = PlanSchema(
@@ -288,7 +291,10 @@ async def test_planner_preserves_valid_tool_arguments() -> None:
                 0,
                 tool_name="web_search",
                 arguments={
-                    "query": "highest bird species simultaneously on camera"
+                    "query": (
+                        "highest bird species simultaneously "
+                        "on camera"
+                    ),
                 },
             ),
             make_final_step(1),
@@ -305,8 +311,12 @@ async def test_planner_preserves_valid_tool_arguments() -> None:
     )
 
     assert result.steps[0].tool_name == "web_search"
+
     assert result.steps[0].arguments == {
-        "query": "highest bird species simultaneously on camera"
+        "query": (
+            "highest bird species simultaneously "
+            "on camera"
+        ),
     }
 
     assert result.steps[-1].is_final_answer is True
@@ -314,16 +324,14 @@ async def test_planner_preserves_valid_tool_arguments() -> None:
 
 @pytest.mark.asyncio
 async def test_planner_recovery_produces_different_valid_strategy() -> None:
-    """
-    Recovery must produce a structurally valid plan that does not repeat
-    the failed execution.
-    """
     client = AsyncMock()
 
     failed_step = make_tool_step(
         0,
         tool_name="web_search",
-        arguments={"query": "GAIA benchmark"},
+        arguments={
+            "query": "GAIA benchmark",
+        },
     )
 
     recovery_plan = PlanSchema(
@@ -332,7 +340,7 @@ async def test_planner_recovery_produces_different_valid_strategy() -> None:
                 0,
                 tool_name="visit_webpage",
                 arguments={
-                    "url": "https://example.com/gaia"
+                    "url": "https://example.com/gaia",
                 },
             ),
             make_final_step(1),
@@ -345,23 +353,26 @@ async def test_planner_recovery_produces_different_valid_strategy() -> None:
 
     failure = AgentError(
         error_type="tool_execution",
-        message="web_search failed to retrieve useful evidence.",
+        message=(
+            "web_search failed to retrieve useful evidence."
+        ),
     )
 
     result = await planner.replan(
         user_question="What is the GAIA benchmark?",
-        context=[],
+        context=FinalContext(
+            items=[],
+            token_count=0,
+        ),
         failed_step=failed_step,
         failure=failure,
     )
 
     assert isinstance(result, PlanSchema)
 
-    # Structural contract.
     assert len(result.steps) == 2
     assert [step.step_id for step in result.steps] == [0, 1]
 
-    # Exactly one final-answer step.
     final_steps = [
         step
         for step in result.steps
@@ -371,12 +382,15 @@ async def test_planner_recovery_produces_different_valid_strategy() -> None:
     assert len(final_steps) == 1
     assert result.steps[-1].is_final_answer is True
 
-    # Recovery must change strategy.
     assert result.steps[0].tool_name == "visit_webpage"
 
-    # Recovery must not repeat the failed execution.
-    failed_signature = planner._fingerprint_step(failed_step)
-    recovery_signature = planner._fingerprint_step(result.steps[0])
+    failed_signature = planner._fingerprint_step(
+        failed_step
+    )
+
+    recovery_signature = planner._fingerprint_step(
+        result.steps[0]
+    )
 
     assert recovery_signature != failed_signature
 
