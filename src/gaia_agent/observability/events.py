@@ -40,6 +40,8 @@ class ObservabilityEvent:
     iteration: int | None = None
     latency: float | None = None
     error: str | None = None
+
+
 def create_event(
     event_type: EventType,
     correlation_id: UUID,
@@ -57,4 +59,20 @@ def create_event(
         iteration=iteration,
         latency=latency,
         error=error,
-    )    
+    )
+
+
+class EventLogger:
+    def __init__(self) -> None:
+        self._events: list[ObservabilityEvent] = []
+
+    def log(self, event: ObservabilityEvent) -> None:
+        if not isinstance(event, ObservabilityEvent):
+            raise TypeError("event must be an ObservabilityEvent")
+        self._events.append(event)
+
+    def get_events(self) -> list[ObservabilityEvent]:
+        return list(self._events)
+
+    def clear(self) -> None:
+        self._events.clear()
