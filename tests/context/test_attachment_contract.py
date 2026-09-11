@@ -9,6 +9,29 @@ from gaia_agent.context.models import ContextRequest
 from gaia_agent.context.attachments import Attachment
 from gaia_agent.core.agent_state import AgentState
 from gaia_agent.context.request_builder import ContextRequestBuilder
+from gaia_agent.context.sources.attachments import AttachmentSource
+
+
+@pytest.mark.asyncio
+async def test_attachment_source_exposes_request_attachments():
+    attachment = Attachment(
+        attachment_id="task-123:report.pdf",
+        filename="report.pdf",
+        path=r"C:\evaluation_files\task-123\report.pdf",
+    )
+
+    request = ContextRequest(
+        user_request="Analyze the attached report.",
+        attachments=(attachment,),
+    )
+
+    source = AttachmentSource()
+
+    assert source.is_available(request)
+
+    result = await source.get(request)
+
+    assert result == [attachment]
 
 
 @pytest.mark.asyncio
@@ -25,6 +48,7 @@ async def test_attachment_survives_context_builder():
     )
 
     policy = MagicMock(
+        include_attachments=True,
         include_conversation=False,
         include_history=False,
         include_memory=False,
@@ -48,6 +72,7 @@ async def test_attachment_survives_context_builder():
         budget=budget,
         validator=validator,
         compressor=compressor,
+        attachment_source=AttachmentSource(),
         conversation_source=MagicMock(),
         history_source=MagicMock(),
         memory_source=MagicMock(),

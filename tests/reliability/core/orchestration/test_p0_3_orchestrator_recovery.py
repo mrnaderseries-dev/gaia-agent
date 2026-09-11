@@ -35,7 +35,6 @@ def make_test_orchestrator() -> Orchestrator:
 
 def make_state() -> AgentState:
     return AgentState(
-        user_id="test-user",
         user_request="Find Malko",
     )
 
@@ -67,7 +66,13 @@ def make_plan(
             make_step(
                 tool_name,
                 query,
-            )
+            ),
+            PlanStep(
+                step_id=1,
+                action="Provide the final answer",
+                step_type=StepType.FINAL_ANSWER,
+                is_final_answer=True,
+            ),
         ],
     )
 
@@ -102,15 +107,15 @@ async def test_recoverable_failure_replans_to_different_tool():
     P0.3 critical path:
 
         web_search("Malko")
-              |
-              | failure
-              v
+             |
+             | failure
+             v
         recovery
-              |
-              v
+             |
+             v
         python("Malko")
-              |
-              v
+             |
+             v
         new execution accepted
 
     The recovery result must actually replace the failed step.
@@ -174,13 +179,13 @@ async def test_recovery_same_execution_is_rejected_by_execution_identity():
     Critical regression:
 
         web_search("Malko")
-              |
-              | failure
-              v
+             |
+             | failure
+             v
         recovery proposes
         web_search("Malko")
-              |
-              v
+             |
+             v
         MUST NOT be treated as a new execution.
 
     This protects against the exact loop that appeared in the GAIA logs.
@@ -226,8 +231,8 @@ async def test_recovery_same_tool_but_different_arguments_is_new_execution():
     Same tool does not automatically mean same execution.
 
         web_search("Malko")
-              |
-              v
+             |
+             v
         web_search("Malko Lebanon")
 
     is a different execution because arguments changed.
@@ -271,11 +276,11 @@ async def test_failed_recovery_does_not_modify_failed_plan():
     If Recovery itself fails:
 
         failed A
-           |
-           v
+            |
+            v
         Recovery FAILS
-           |
-           v
+            |
+            v
         original failed step remains
 
     We must not silently replace the plan with an invalid result.
@@ -395,14 +400,14 @@ async def test_successful_recovery_resets_execution_error_state():
     A successful replan must clear stale execution state.
 
         failure
-           |
-           v
+            |
+            v
         recovery
-           |
-           v
+            |
+            v
         new step
-           |
-           v
+            |
+            v
         old error cleared
     """
 

@@ -7,248 +7,22 @@ from .errors import (
     ErrorCategory,
     ErrorSeverity,
 )
-
-
-class AgentRuntimeError(Exception):
-    def __init__(
-        self,
-        message: str,
-        *,
-        retryable: bool = False,
-        recoverable: bool = False,
-    ) -> None:
-        super().__init__(message)
-        self.retryable = retryable
-        self.recoverable = recoverable
-
-
-class AuthenticationError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Authentication failed.",
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=False,
-        )
-
-
-class AuthorizationError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Authorization failed.",
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=False,
-        )
-
-
-class RateLimitError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Rate limit exceeded.",
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=True,
-            recoverable=False,
-        )
-
-
-class NetworkError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Network operation failed.",
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=True,
-            recoverable=False,
-        )
-
-
-class ToolExecutionError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Tool execution failed.",
-        *,
-        retryable: bool = False,
-        recoverable: bool = False,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=retryable,
-            recoverable=recoverable,
-        )
-
-
-class ModelExecutionError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Model execution failed.",
-        *,
-        retryable: bool = False,
-        recoverable: bool = False,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=retryable,
-            recoverable=recoverable,
-        )
-
-
-class LLMFailure(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "LLM execution failed.",
-        *,
-        retryable: bool = False,
-        recoverable: bool = False,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=retryable,
-            recoverable=recoverable,
-        )
-
-
-class LLMOutputError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "LLM returned invalid output.",
-        *,
-        recoverable: bool = True,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=recoverable,
-        )
-
-
-class ValidationError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Validation failed.",
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=False,
-        )
-
-
-class InternalAgentError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Internal agent failure.",
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=False,
-        )
-
-
-class ContextCompressionError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Context compression failed.",
-        *,
-        recoverable: bool = True,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=recoverable,
-        )
-
-
-class ToolArgumentError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Tool argument validation failed.",
-        *,
-        recoverable: bool = True,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=recoverable,
-        )
-
-
-class ApprovalBlockedError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Action requires human approval.",
-        *,
-        recoverable: bool = False,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=recoverable,
-        )
-
-
-class PythonSyntaxError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Python code contains a syntax error.",
-        *,
-        recoverable: bool = True,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=recoverable,
-        )
-
-
-class PythonImportError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Python code imports an unavailable module.",
-        *,
-        recoverable: bool = True,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=recoverable,
-        )
-
-
-class EmptyResultError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Tool returned an empty result.",
-        *,
-        recoverable: bool = True,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=recoverable,
-        )
-
-
-class InvalidResultError(AgentRuntimeError):
-    def __init__(
-        self,
-        message: str = "Operation returned an invalid result.",
-        *,
-        recoverable: bool = True,
-    ) -> None:
-        super().__init__(
-            message,
-            retryable=False,
-            recoverable=recoverable,
-        )
+from .exception import (
+    ApprovalBlockedError,
+    AuthenticationError,
+    AuthorizationError,
+    EmptyResultError,
+    InvalidResultError,
+    LLMFailure,
+    LLMOutputError,
+    NetworkError,
+    PythonImportError,
+    PythonSyntaxError,
+    RateLimitError,
+    ToolArgumentError,
+    ToolExecutionError,
+    ValidationError,
+)
 
 
 class ErrorHandler:
@@ -276,6 +50,7 @@ class ErrorHandler:
         retryable = bool(
             getattr(exception, "retryable", False)
         )
+
         recoverable = bool(
             getattr(exception, "recoverable", False)
         )
@@ -287,13 +62,20 @@ class ErrorHandler:
         }:
             retryable = True
 
-        if category == ErrorCategory.LLM_OUTPUT_ERROR:
+        if category in {
+            ErrorCategory.TIMEOUT,
+            ErrorCategory.NETWORK,
+            ErrorCategory.AUTHORIZATION,
+            ErrorCategory.FILE_NOT_FOUND,
+            ErrorCategory.TOOL_ARGUMENT_ERROR,
+            ErrorCategory.TOOL_EXECUTION_ERROR,
+            ErrorCategory.LLM_OUTPUT_ERROR,
+        }:
             recoverable = True
 
         return AgentError(
             error_type=type(exception).__name__,
-            message=str(exception)
-            or type(exception).__name__,
+            message=str(exception) or type(exception).__name__,
             category=category,
             severity=severity,
             retryable=retryable,
@@ -314,10 +96,10 @@ class ErrorHandler:
         attempt: int,
         correlation_id: Any,
     ) -> AgentError:
-        if error.source == "unknown":
+        if error.source is None or error.source == "unknown":
             error.source = source
 
-        if error.operation == "unknown":
+        if error.operation is None or error.operation == "unknown":
             error.operation = operation
 
         if error.attempt == 0:
@@ -332,100 +114,52 @@ class ErrorHandler:
         self,
         exception: Exception,
     ) -> ErrorCategory:
-        if isinstance(
-            exception,
-            AuthenticationError,
-        ):
+        if isinstance(exception, AuthenticationError):
             return ErrorCategory.AUTHENTICATION
 
-        if isinstance(
-            exception,
-            AuthorizationError,
-        ):
+        if isinstance(exception, AuthorizationError):
             return ErrorCategory.AUTHORIZATION
 
-        if isinstance(
-            exception,
-            RateLimitError,
-        ):
+        if isinstance(exception, RateLimitError):
             return ErrorCategory.RATE_LIMIT
 
-        if isinstance(
-            exception,
-            NetworkError,
-        ):
+        if isinstance(exception, NetworkError):
             return ErrorCategory.NETWORK
 
-        if isinstance(
-            exception,
-            ToolArgumentError,
-        ):
+        if isinstance(exception, ToolArgumentError):
             return ErrorCategory.TOOL_ARGUMENT_ERROR
 
-        if isinstance(
-            exception,
-            ToolExecutionError,
-        ):
+        if isinstance(exception, ToolExecutionError):
             return ErrorCategory.TOOL_EXECUTION_ERROR
 
-        if isinstance(
-            exception,
-            ModelExecutionError,
-        ):
+        if isinstance(exception, LLMFailure):
             return ErrorCategory.LLM_FAILURE
 
-        if isinstance(
-            exception,
-            LLMFailure,
-        ):
-            return ErrorCategory.LLM_FAILURE
-
-        if isinstance(
-            exception,
-            LLMOutputError,
-        ):
+        if isinstance(exception, LLMOutputError):
             return ErrorCategory.LLM_OUTPUT_ERROR
 
-        if isinstance(
-            exception,
-            ApprovalBlockedError,
-        ):
+        if isinstance(exception, ApprovalBlockedError):
             return ErrorCategory.APPROVAL_BLOCKED
 
-        if isinstance(
-            exception,
-            PythonSyntaxError,
-        ):
+        if isinstance(exception, PythonSyntaxError):
             return ErrorCategory.PYTHON_SYNTAX_ERROR
 
-        if isinstance(
-            exception,
-            PythonImportError,
-        ):
+        if isinstance(exception, PythonImportError):
             return ErrorCategory.PYTHON_IMPORT_ERROR
 
-        if isinstance(
-            exception,
-            EmptyResultError,
-        ):
+        if isinstance(exception, EmptyResultError):
             return ErrorCategory.EMPTY_RESULT
 
-        if isinstance(
-            exception,
-            InvalidResultError,
-        ):
+        if isinstance(exception, InvalidResultError):
             return ErrorCategory.INVALID_RESULT
 
-        if isinstance(
-            exception,
-            ValidationError,
-        ):
+        if isinstance(exception, ValidationError):
             return ErrorCategory.VALIDATION
 
-        if isinstance(
-            exception,
-            TimeoutError,
-        ):
+        if isinstance(exception, FileNotFoundError):
+            return ErrorCategory.FILE_NOT_FOUND
+
+        if isinstance(exception, TimeoutError):
             return ErrorCategory.TIMEOUT
 
         name = type(exception).__name__.lower()
@@ -471,7 +205,6 @@ class ErrorHandler:
             ErrorCategory.AUTHENTICATION,
             ErrorCategory.AUTHORIZATION,
             ErrorCategory.INTERNAL,
-            ErrorCategory.UNKNOWN,
         }:
             return ErrorSeverity.HIGH
 

@@ -22,6 +22,7 @@ from gaia_agent.context.ContextBudget import ContextBudget
 from gaia_agent.context.ContextCompressor import ContextCompressor
 from gaia_agent.context.ContextPolicy import ContextPolicy
 from gaia_agent.context.ContextValidator import ContextValidator
+from gaia_agent.context.sources.attachments import AttachmentSource
 from gaia_agent.context.sources.conversation import ConversationSource
 from gaia_agent.context.sources.history import HistorySource
 from gaia_agent.context.sources.runtime import RuntimeSource
@@ -131,7 +132,6 @@ async def create_agent() -> AgentLoop:
     )
 
     approval_policy = ApprovalPolicy()
-
     termination_policy = TerminationPolicy(
         max_iterations=20,
     )
@@ -141,6 +141,7 @@ async def create_agent() -> AgentLoop:
         include_conversation=True,
         include_history=True,
         include_runtime=True,
+        include_attachments=True,
     )
 
     context_budget = ContextBudget(
@@ -158,6 +159,7 @@ async def create_agent() -> AgentLoop:
         policy=context_policy,
     )
 
+    attachment_source = AttachmentSource()
     conversation_source = ConversationSource()
     history_source = HistorySource()
     runtime_source = RuntimeSource()
@@ -167,6 +169,7 @@ async def create_agent() -> AgentLoop:
         budget=context_budget,
         validator=context_validator,
         compressor=context_compressor,
+        attachment_source=attachment_source,
         conversation_source=conversation_source,
         history_source=history_source,
         memory_source=None,

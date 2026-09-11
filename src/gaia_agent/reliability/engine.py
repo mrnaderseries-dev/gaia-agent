@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable
 from gaia_agent.reliability.error_handler import ErrorHandler
 from gaia_agent.reliability.errors import AgentError
 from gaia_agent.reliability.failure_classifier import (
-    FailureClass,
+    FailureClassification,
     FailureClassifier,
 )
 from gaia_agent.reliability.policies.recovery_policy import (
@@ -30,7 +30,7 @@ class ReliabilityAction(str, Enum):
 class ReliabilityResult:
     action: ReliabilityAction
     error: AgentError | None = None
-    failure_class: FailureClass | None = None
+    failure_class: FailureClassification | None = None
     attempt: int = 0
     recovery_attempted: bool = False
     recovery_result: RecoveryResult | None = None
@@ -83,37 +83,35 @@ class ReliabilityEngine:
 
         normalized_error = self.error_handler.handle(error)
 
-        failure_class = self.failure_classifier.classify(
+        classification = self.failure_classifier.classify(
             normalized_error
         )
 
         if attempt < max_attempts:
             retry_decision = self.retry_policy.evaluate(
-                failure_class,
+                classification,
                 current_attempt=attempt,
             )
 
             if retry_decision.should_retry:
-                await self.retry.delay(
-                    retry_decision.delay
-                )
+                await self.retry.delay(retry_decision.delay)
 
                 return ReliabilityResult(
                     action=ReliabilityAction.RETRY,
                     error=normalized_error,
-                    failure_class=failure_class,
+                    failure_class=classification,
                     attempt=attempt,
                     reason=retry_decision.reason,
                 )
 
         recovery_decision = self.recovery_policy.evaluate(
-            failure_class
+            classification
         )
 
         if recovery_decision.action == RecoveryAction.REPLAN:
             return await self._handle_replan(
                 error=normalized_error,
-                failure_class=failure_class,
+                classification=classification,
                 attempt=attempt,
                 recovery_operation=recovery_operation,
                 change_detector=change_detector,
@@ -122,7 +120,7 @@ class ReliabilityEngine:
         return ReliabilityResult(
             action=ReliabilityAction.STOP,
             error=normalized_error,
-            failure_class=failure_class,
+            failure_class=classification,
             attempt=attempt,
             reason=recovery_decision.reason,
         )
@@ -131,7 +129,7 @@ class ReliabilityEngine:
         self,
         *,
         error: AgentError,
-        failure_class: FailureClass,
+        classification: FailureClassification,
         attempt: int,
         recovery_operation: Callable[[], Awaitable[Any]] | None,
         change_detector: Callable[[Any], bool] | None,
@@ -140,7 +138,7 @@ class ReliabilityEngine:
             return ReliabilityResult(
                 action=ReliabilityAction.STOP,
                 error=error,
-                failure_class=failure_class,
+                failure_class=classification,
                 attempt=attempt,
                 reason="No recovery operation was supplied.",
             )
@@ -149,17 +147,17 @@ class ReliabilityEngine:
             return ReliabilityResult(
                 action=ReliabilityAction.STOP,
                 error=error,
-                failure_class=failure_class,
+                failure_class=classification,
                 attempt=attempt,
                 reason="No change detector was supplied.",
             )
 
         try:
             recovery_result = await self.recovery.execute(
+                error=error,
                 operation=recovery_operation,
                 change_detector=change_detector,
             )
-
         except Exception as exc:
             recovery_error = self.error_handler.handle(
                 exc,
@@ -168,10 +166,14 @@ class ReliabilityEngine:
                 attempt=attempt,
             )
 
+            recovery_classification = self.failure_classifier.classify(
+                recovery_error
+            )
+
             return ReliabilityResult(
                 action=ReliabilityAction.STOP,
                 error=recovery_error,
-                failure_class=FailureClass.UNKNOWN,
+                failure_class=recovery_classification,
                 attempt=attempt,
                 recovery_attempted=True,
                 reason=recovery_error.message,
@@ -181,7 +183,7 @@ class ReliabilityEngine:
             return ReliabilityResult(
                 action=ReliabilityAction.REPLAN,
                 error=error,
-                failure_class=failure_class,
+                failure_class=classification,
                 attempt=attempt,
                 recovery_attempted=True,
                 recovery_result=recovery_result,
@@ -191,7 +193,7 @@ class ReliabilityEngine:
         return ReliabilityResult(
             action=ReliabilityAction.STOP,
             error=error,
-            failure_class=failure_class,
+            failure_class=classification,
             attempt=attempt,
             recovery_attempted=True,
             recovery_result=recovery_result,

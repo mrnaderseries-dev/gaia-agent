@@ -26,7 +26,13 @@ def make_plan(
                 tool_name=tool_name,
                 arguments={"query": query},
                 is_final_answer=False,
-            )
+            ),
+            PlanStep(
+                step_id=1,
+                action="Provide the final answer",
+                step_type=StepType.FINAL_ANSWER,
+                is_final_answer=True,
+            ),
         ],
     )
 
@@ -58,7 +64,6 @@ def make_test_orchestrator() -> Orchestrator:
 
 def make_state() -> AgentState:
     return AgentState(
-        user_id="test-user",
         user_request="Find Malko",
     )
 
@@ -317,7 +322,6 @@ async def test_replan_same_execution_must_stop():
     orchestrator = make_test_orchestrator()
 
     state = AgentState(
-        user_id="test-user",
         user_request="Find Malko",
     )
     orchestrator.state = state
@@ -334,7 +338,7 @@ async def test_replan_same_execution_must_stop():
         "Malko",
     )
 
-    state.plan = original
+    state.plan = original.steps
     state.current_step = 0
 
     assert orchestrator._same_execution(
@@ -362,7 +366,6 @@ async def test_replan_different_tool_must_be_executable():
     orchestrator = make_test_orchestrator()
 
     state = AgentState(
-        user_id="test-user",
         user_request="Find Malko",
     )
     orchestrator.state = state
@@ -379,7 +382,7 @@ async def test_replan_different_tool_must_be_executable():
         "Malko",
     )
 
-    state.plan = original
+    state.plan = original.steps
     state.current_step = 0
 
     assert orchestrator._same_execution(

@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from gaia_agent.reliability.failure_classifier import FailureClass
+from gaia_agent.reliability.failure_classifier import (
+    FailureClassification,
+    FailureType,
+)
 
 
 class RecoveryAction(str, Enum):
@@ -28,9 +31,9 @@ class RecoveryPolicy:
 
     def evaluate(
         self,
-        failure_class: FailureClass,
+        classification: FailureClassification,
     ) -> RecoveryDecision:
-        if failure_class == FailureClass.RECOVERABLE:
+        if classification.failure_type is FailureType.RECOVERABLE:
             if self.allow_replanning:
                 return RecoveryDecision(
                     action=RecoveryAction.REPLAN,
@@ -42,19 +45,19 @@ class RecoveryPolicy:
                 reason="Replanning is disabled.",
             )
 
-        if failure_class == FailureClass.TRANSIENT:
+        if classification.failure_type is FailureType.TRANSIENT:
             return RecoveryDecision(
                 action=RecoveryAction.NONE,
                 reason="Transient failures are handled by RetryPolicy.",
             )
 
-        if failure_class == FailureClass.PERMANENT:
+        if classification.failure_type is FailureType.PERMANENT:
             return RecoveryDecision(
                 action=RecoveryAction.STOP,
                 reason="Permanent failure cannot be recovered automatically.",
             )
 
-        if failure_class == FailureClass.FATAL:
+        if classification.failure_type is FailureType.FATAL:
             return RecoveryDecision(
                 action=RecoveryAction.STOP,
                 reason="Fatal failure requires termination.",

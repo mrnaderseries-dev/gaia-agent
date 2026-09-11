@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 
 from gaia_agent.reliability.engine import ReliabilityEngine

@@ -1,41 +1,55 @@
 ﻿from __future__ import annotations
 
-import logging
-from typing import Any
-
-from gaia_agent.core.agent_state import AgentState, AgentPhase
-from gaia_agent.core.orchestration.orchestrator import AgentOrchestrator
-from gaia_agent.core.policies.termination import TerminationReason
-
-logger = logging.getLogger(__name__)
+from gaia_agent.core.agent_state import AgentState
+from gaia_agent.core.orchestration.orchestrator import Orchestrator
+from gaia_agent.core.policies.termination import (
+    TerminationDecision,
+    TerminationPolicy,
+    TerminationState,
+    TerminationReason,
+)
 
 
 class AgentLoop:
     def __init__(
         self,
         *,
-        orchestrator: AgentOrchestrator,
+        orchestrator: Orchestrator,
+        termination_policy: TerminationPolicy | None = None,
+        max_iterations: int | None = None,
     ) -> None:
         self.orchestrator = orchestrator
-        self.state: AgentState | None = None
+        self.termination_policy = termination_policy
+        self.max_iterations = max_iterations
+        self._state: AgentState | None = None
+
+    @property
+    def state(self) -> AgentState | None:
+        return self._state
+
+    @state.setter
+    def state(self, value: AgentState) -> None:
+        self._state = value
 
     async def run(
         self,
         state: AgentState,
     ) -> AgentState:
-        if not isinstance(state, AgentState):
-            raise TypeError(
-                "AgentLoop.run() requires an AgentState."
+        user_req = (
+            getattr(state, "user_request", None)
+            or getattr(state, "user_question", None)
+            or getattr(state, "question", None)
+        )
+
+        if not user_req or not str(user_req).strip():
+            setattr(
+                state,
+                "user_request",
+                "Perform the evaluation task.",
             )
+        else:
+            setattr(state, "user_request", user_req)
 
-        user_request = state.user_request.strip()
-
-        if not user_request:
-            raise ValueError(
-                "AgentState.user_request cannot be empty."
-            )
-
-        state.user_request = user_request
         self.state = state
 
         self.orchestrator.bind_state(state)
@@ -49,14 +63,15 @@ class AgentLoop:
             if termination.should_stop:
                 break
 
-            if not state.plan:
-                await self.orchestrator.generate_initial_plan()
-
-            current_iteration = state.iteration
+            if not getattr(state, "plan", None) or len(state.plan) == 0:
+                if hasattr(
+                    self.orchestrator,
+                    "generate_initial_plan",
+                ):
+                    await self.orchestrator.generate_initial_plan()
 
             await self.orchestrator.run_iteration()
-
-            state.iteration = current_iteration + 1
+            state.iteration += 1
 
         if (
             termination
@@ -67,17 +82,66 @@ class AgentLoop:
 
         return state
 
-    def check_termination(self) -> Any:
-        if self.state is None:
-            class DummyTermination:
-                should_stop = True
-                reason = TerminationReason.TERMINATION
-            return DummyTermination()
+    def check_termination(self) -> TerminationDecision:
+        state = self._require_state()
 
-        if hasattr(self.orchestrator, "check_termination"):
-            return self.orchestrator.check_termination()
+        termination_state = TerminationState(
+            iteration=getattr(state, "iteration", 0),
+            final_answer_ready=getattr(
+                state,
+                "final_answer_ready",
+                False,
+            ),
+            final_answer_verified=getattr(
+                state,
+                "final_answer_verified",
+                False,
+            ),
+            verification_attempts=getattr(
+                state,
+                "verification_attempts",
+                0,
+            ),
+            fatal_error=getattr(
+                state,
+                "fatal_error",
+                False,
+            ),
+            human_aborted=getattr(
+                state,
+                "human_aborted",
+                False,
+            ),
+            explicit_stop=getattr(
+                state,
+                "explicit_stop",
+                False,
+            ),
+            timed_out=getattr(
+                state,
+                "timed_out",
+                False,
+            ),
+        )
 
-        class DefaultTermination:
-            should_stop = self.state.is_terminal
-            reason = self.state.termination_reason
-        return DefaultTermination()
+        if self.termination_policy is not None:
+            decision = self.termination_policy.evaluate(
+                termination_state
+            )
+        else:
+            decision = TerminationDecision(
+                should_stop=False,
+            )
+
+        if decision.should_stop:
+            state.termination_reason = decision.reason
+
+        return decision
+
+    def _require_state(self) -> AgentState:
+        if self._state is None:
+            raise RuntimeError(
+                "AgentState is not bound."
+            )
+
+        return self._state

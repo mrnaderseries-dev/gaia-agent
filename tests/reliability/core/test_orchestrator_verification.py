@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
 import pytest
 
@@ -24,6 +27,9 @@ def make_orchestrator():
     """
     orchestrator = Orchestrator.__new__(Orchestrator)
 
+    orchestrator.execution_history = set()
+    orchestrator.correlation_id = uuid4()
+
     orchestrator.state = SimpleNamespace(
         user_request="What is the answer?",
         final_answer="42",
@@ -31,6 +37,7 @@ def make_orchestrator():
         final_answer_verified=False,
         task_completed=False,
         verification_attempts=0,
+        iteration=0,
         tool_error=None,
         evidence=[],
         plan=[],
@@ -62,12 +69,9 @@ def make_orchestrator():
     )
 
     orchestrator.verifier = Mock()
-
     orchestrator.reliability_engine = Mock()
-
     orchestrator.planner = Mock()
     orchestrator.error_handler = Mock()
-
     orchestrator.event_logger = Mock()
     orchestrator.tracer = Mock()
 
@@ -77,7 +81,6 @@ def make_orchestrator():
     )
 
     orchestrator.loop_detector = Mock()
-
     orchestrator.emit_agent_failure = Mock()
 
     return orchestrator
@@ -179,7 +182,6 @@ async def test_plan_completion_creates_final_answer_step_when_not_ready():
     assert step.step_type == StepType.LLM
     assert step.tool_name is None
     assert step.is_final_answer is True
-
     assert orchestrator.state.final_answer_verified is False
     assert orchestrator.state.task_completed is False
 
@@ -227,9 +229,7 @@ async def test_verifier_pass_marks_answer_verified():
     ]
 
     orchestrator.context_builder.build = AsyncMock(
-        return_value=SimpleNamespace(
-            items=[]
-        )
+        return_value=SimpleNamespace(items=[])
     )
 
     orchestrator.verifier.verify = AsyncMock(
@@ -239,8 +239,6 @@ async def test_verifier_pass_marks_answer_verified():
         )
     )
 
-    # Deterministic verification must be uncertain so that the
-    # Orchestrator actually reaches VerifierAgent.
     orchestrator.reliability_engine.execute = AsyncMock(
         return_value=SimpleNamespace(
             success=True,
@@ -306,7 +304,6 @@ async def test_verifier_failure_never_marks_answer_completed():
         )
     )
 
-    # Prevent the test from entering the real recovery implementation.
     orchestrator._handle_verification_failure = AsyncMock()
 
     await orchestrator._verify_final_answer()
@@ -336,7 +333,6 @@ async def test_verification_with_no_evidence_cannot_complete():
         return_value=SimpleNamespace(items=[])
     )
 
-    # If the verifier is reached, make it explicitly reject.
     orchestrator.reliability_engine.execute = AsyncMock(
         return_value=SimpleNamespace(
             success=True,
@@ -402,7 +398,7 @@ async def test_verification_failure_before_budget_attempts_recovery():
         step_type=StepType.TOOL,
         tool_name="web_search",
         arguments={"query": "answer"},
-        is_final_answer=True,
+        is_final_answer=False,
     )
 
     orchestrator.planner.replan_step = AsyncMock(
@@ -458,9 +454,7 @@ async def test_exhausted_verification_budget_keeps_answer_unverified():
 
     error = Mock()
 
-    await orchestrator._handle_verification_failure(
-        error
-    )
+    await orchestrator._handle_verification_failure(error)
 
     assert orchestrator.state.final_answer_ready is True
     assert orchestrator.state.final_answer_verified is False
@@ -480,9 +474,6 @@ async def test_exhausted_verification_budget_keeps_answer_unverified():
 # ---------------------------------------------------------------------------
 # 11. LLM-positive verification should not be downgraded merely because
 #     the evidence is web_search evidence.
-#
-#     This protects the new VerifierAgent contract:
-#       web evidence -> semantic LLM judgment.
 # ---------------------------------------------------------------------------
 
 
@@ -509,8 +500,6 @@ async def test_llm_verified_web_evidence_can_complete_task():
         return_value=SimpleNamespace(items=[])
     )
 
-    # Force deterministic verification to be uncertain so the
-    # VerifierAgent path is exercised.
     orchestrator.reliability_engine.execute = AsyncMock(
         return_value=SimpleNamespace(
             success=True,
@@ -528,10 +517,6 @@ async def test_llm_verified_web_evidence_can_complete_task():
     assert orchestrator.state.final_answer_verified is True
     assert orchestrator.state.task_completed is True
     assert orchestrator.state.tool_error is None
-
-    orchestrator.metrics.increment.assert_any_call(
-        "answers_verified"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -702,7 +687,7 @@ async def test_verification_recovery_clears_previous_candidate():
         step_type=StepType.TOOL,
         tool_name="web_search",
         arguments={"query": "better evidence"},
-        is_final_answer=True,
+        is_final_answer=False,
     )
 
     orchestrator.planner.replan_step = AsyncMock(

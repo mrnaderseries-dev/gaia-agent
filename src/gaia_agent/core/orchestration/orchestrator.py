@@ -17,16 +17,6 @@ from gaia_agent.agents.verifier import (
 from gaia_agent.context.ContextBuilder import ContextBuilder
 from gaia_agent.core.agent_execution import AgentExecution
 from gaia_agent.core.agent_state import AgentState
-from gaia_agent.planner.planner import Planner
-from gaia_agent.planner.plan_schema import (
-    PlanSchema,
-    PlanStep,
-    StepType,
-)
-from gaia_agent.reliability.engine import ReliabilityEngine
-from gaia_agent.reliability.error_handler import ErrorHandler
-from gaia_agent.reliability.errors import AgentError
-from gaia_agent.reliability.loop_detector import LoopDetector
 from gaia_agent.observability.events import (
     EventType,
     create_event,
@@ -34,8 +24,16 @@ from gaia_agent.observability.events import (
 from gaia_agent.observability.logger import EventLogger
 from gaia_agent.observability.metrics import Metrics
 from gaia_agent.observability.tracer import Tracer
-
-
+from gaia_agent.planner.plan_schema import (
+    PlanSchema,
+    PlanStep,
+    StepType,
+)
+from gaia_agent.planner.planner import Planner
+from gaia_agent.reliability.engine import ReliabilityEngine
+from gaia_agent.reliability.error_handler import ErrorHandler
+from gaia_agent.reliability.errors import AgentError
+from gaia_agent.reliability.loop_detector import LoopDetector
 
 MAX_REPLANS = 2
 MAX_SAME_FAILURE = 1
@@ -77,7 +75,7 @@ class Orchestrator:
         self.state: AgentState | None = None
         self.correlation_id: UUID = uuid4()
         
-
+        # التهيئة الصحيحة داخل الـ __init__ ليكون عمرها من عمر الـ Orchestrator
         self.execution_history: set[str] = set()
 
     def bind_state(
@@ -86,7 +84,6 @@ class Orchestrator:
     ) -> None:
         self.state = state
         self.agent_execution.bind_state(state)
-        # يُمسح عند bind_state()
         self.execution_history.clear()
 
     def _require_state(

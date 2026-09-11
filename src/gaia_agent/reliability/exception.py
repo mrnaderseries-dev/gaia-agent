@@ -68,7 +68,7 @@ class ToolExecutionError(AgentRuntimeError):
         message: str = "Tool execution failed.",
         *,
         retryable: bool = False,
-        recoverable: bool = False,
+        recoverable: bool = True,
     ) -> None:
         super().__init__(
             message,

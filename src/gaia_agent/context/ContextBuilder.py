@@ -6,6 +6,7 @@ from .ContextPolicy import ContextPolicy
 from .ContextValidator import ContextValidator
 from .models import ContextRequest, FinalContext
 
+from .sources.attachments import AttachmentSource
 from .sources.conversation import ConversationSource
 from .sources.history import HistorySource
 from .sources.memory import MemorySource
@@ -19,6 +20,7 @@ class ContextBuilder:
         budget: ContextBudget,
         validator: ContextValidator,
         compressor: ContextCompressor,
+        attachment_source: AttachmentSource,
         conversation_source: ConversationSource,
         history_source: HistorySource,
         memory_source: MemorySource,
@@ -29,6 +31,7 @@ class ContextBuilder:
         self.validator = validator
         self.compressor = compressor
 
+        self.attachment_source = attachment_source
         self.conversation_source = conversation_source
         self.history_source = history_source
         self.memory_source = memory_source
@@ -41,7 +44,16 @@ class ContextBuilder:
 
         context: list[object] = []
 
-        
+        if self.policy.include_attachments:
+            if self.attachment_source.is_available(
+                request
+            ):
+                context.extend(
+                    await self.attachment_source.get(
+                        request
+                    )
+                )
+
         if self.policy.include_conversation:
             if self.conversation_source.is_available(
                 request
@@ -79,6 +91,7 @@ class ContextBuilder:
                         request
                     )
                 )
+
         context = await self.compressor.compress(
             context
         )

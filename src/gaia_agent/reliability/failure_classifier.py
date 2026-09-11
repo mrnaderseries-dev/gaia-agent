@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
-from gaia_agent.reliability.errors import AgentError, ErrorCategory
+from gaia_agent.reliability.errors import (
+    AgentError,
+    ErrorCategory,
+    ErrorSeverity,
+)
 
 
-class FailureClass(str, Enum):
+class FailureType(str, Enum):
     TRANSIENT = "transient"
     RECOVERABLE = "recoverable"
     PERMANENT = "permanent"
@@ -13,10 +18,20 @@ class FailureClass(str, Enum):
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True, slots=True)
+class FailureClassification:
+    failure_type: FailureType
+
+
 class FailureClassifier:
-    def classify(self, error: AgentError) -> FailureClass:
+    def classify(
+        self,
+        error: AgentError,
+    ) -> FailureClassification:
         if not isinstance(error, AgentError):
-            return FailureClass.UNKNOWN
+            return FailureClassification(
+                FailureType.UNKNOWN
+            )
 
         category = error.category
 
@@ -25,9 +40,12 @@ class FailureClassifier:
             ErrorCategory.NETWORK,
             ErrorCategory.RATE_LIMIT,
         }:
-            return FailureClass.TRANSIENT
+            return FailureClassification(
+                FailureType.TRANSIENT
+            )
 
         if category in {
+            ErrorCategory.AUTHORIZATION,
             ErrorCategory.PLAN_SEMANTIC_ERROR,
             ErrorCategory.PLAN_SCHEMA_ERROR,
             ErrorCategory.PLAN_STRATEGY_ERROR,
@@ -45,21 +63,26 @@ class FailureClassifier:
             ErrorCategory.LLM_OUTPUT_ERROR,
             ErrorCategory.VALIDATION,
         }:
-            return FailureClass.RECOVERABLE
+            return FailureClassification(
+                FailureType.RECOVERABLE
+            )
 
         if category in {
             ErrorCategory.AUTHENTICATION,
-            ErrorCategory.AUTHORIZATION,
             ErrorCategory.APPROVAL_BLOCKED,
             ErrorCategory.TRANSITION_FAILURE,
         }:
-            return FailureClass.PERMANENT
+            return FailureClassification(
+                FailureType.PERMANENT
+            )
 
         if category in {
             ErrorCategory.LOOP_DETECTED,
             ErrorCategory.INTERNAL,
         }:
-            return FailureClass.FATAL
+            return FailureClassification(
+                FailureType.FATAL
+            )
 
         if category in {
             ErrorCategory.TOOL_EXECUTION_ERROR,
@@ -67,20 +90,39 @@ class FailureClassifier:
             ErrorCategory.EXECUTION,
         }:
             if error.retryable:
-                return FailureClass.TRANSIENT
+                return FailureClassification(
+                    FailureType.TRANSIENT
+                )
 
             if error.recoverable:
-                return FailureClass.RECOVERABLE
+                return FailureClassification(
+                    FailureType.RECOVERABLE
+                )
 
-            return FailureClass.PERMANENT
-
-        if category == ErrorCategory.UNKNOWN:
-            return FailureClass.UNKNOWN
+            return FailureClassification(
+                FailureType.PERMANENT
+            )
 
         if error.retryable:
-            return FailureClass.TRANSIENT
+            return FailureClassification(
+                FailureType.TRANSIENT
+            )
 
         if error.recoverable:
-            return FailureClass.RECOVERABLE
+            return FailureClassification(
+                FailureType.RECOVERABLE
+            )
 
-        return FailureClass.UNKNOWN
+        if error.severity is ErrorSeverity.CRITICAL:
+            return FailureClassification(
+                FailureType.FATAL
+            )
+
+        if error.severity is ErrorSeverity.HIGH:
+            return FailureClassification(
+                FailureType.PERMANENT
+            )
+
+        return FailureClassification(
+            FailureType.UNKNOWN
+        )
