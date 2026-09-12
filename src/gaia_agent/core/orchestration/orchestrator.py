@@ -1,48 +1,27 @@
 from __future__ import annotations
 
-import json
-import logging
 from typing import Any
-from uuid import UUID, uuid4
 
-from gaia_agent.agents.answer_sanitizer import AnswerSanitizer
-from gaia_agent.agents.verifier import (
-    VerificationInput,
-    VerificationResult,
-    VerificationStatus,
-    VerifierAgent,
-    deterministic_verification,
-    evidence_supports_candidate,
-)
+from gaia_agent.agents.verifier import VerifierAgent
 from gaia_agent.context.ContextBuilder import ContextBuilder
-from gaia_agent.core.agent_execution import AgentExecution
-from gaia_agent.core.agent_state import AgentState
-from gaia_agent.observability.events import (
-    EventType,
-    create_event,
+from gaia_agent.context.models import FinalContext
+from gaia_agent.context.request_builder import ContextRequestBuilder
+from gaia_agent.core.agent_execution import (
+    AgentExecution,
+    ExecutionRequest,
+    ExecutionResult,
 )
-from gaia_agent.observability.logger import EventLogger
-from gaia_agent.observability.metrics import Metrics
-from gaia_agent.observability.tracer import Tracer
-from gaia_agent.planner.plan_schema import (
-    PlanSchema,
-    PlanStep,
-    StepType,
-)
-from gaia_agent.planner.planner import Planner
+from gaia_agent.core.agent_state import AgentPhase, AgentState
+from gaia_agent.planner.plan_schema import PlanSchema, PlanStep, StepType
+from gaia_agent.planner.planner import Planner, PlannerRecoveryRequired
 from gaia_agent.reliability.engine import ReliabilityEngine
-from gaia_agent.reliability.error_handler import ErrorHandler
-from gaia_agent.reliability.errors import AgentError
 from gaia_agent.reliability.loop_detector import LoopDetector
 
-MAX_REPLANS = 2
-MAX_SAME_FAILURE = 1
-MAX_SAME_PLAN = 1
-
-
-MAX_VERIFICATION_ATTEMPTS = 2
-
-logger = logging.getLogger(__name__)
+from .models import (
+    ExecutionRecord,
+    OrchestrationContext,
+    VerificationRecord,
+)
 
 
 class Orchestrator:
@@ -52,1564 +31,444 @@ class Orchestrator:
         context_builder: ContextBuilder,
         planner: Planner,
         agent_execution: AgentExecution,
-        error_handler: ErrorHandler,
         reliability_engine: ReliabilityEngine,
         loop_detector: LoopDetector,
         verifier: VerifierAgent,
-        answer_sanitizer: AnswerSanitizer,
-        event_logger: EventLogger,
-        metrics: Metrics,
-        tracer: Tracer,
     ) -> None:
-        self.context_builder = context_builder
-        self.planner = planner
-        self.agent_execution = agent_execution
-        self.error_handler = error_handler
-        self.reliability_engine = reliability_engine
-        self.loop_detector = loop_detector
-        self.verifier = verifier
-        self.answer_sanitizer = answer_sanitizer
-        self.event_logger = event_logger
-        self.metrics = metrics
-        self.tracer = tracer
-        self.state: AgentState | None = None
-        self.correlation_id: UUID = uuid4()
-        
-        # التهيئة الصحيحة داخل الـ __init__ ليكون عمرها من عمر الـ Orchestrator
-        self.execution_history: set[str] = set()
+        self._context_builder = context_builder
+        self._planner = planner
+        self._agent_execution = agent_execution
+        self._reliability = reliability_engine
+        self._loop_detector = loop_detector
+        self._verifier = verifier
 
-    def bind_state(
+        self._state: AgentState | None = None
+        self._context: OrchestrationContext | None = None
+
+    def bind(
         self,
+        *,
         state: AgentState,
+        context: OrchestrationContext,
     ) -> None:
-        self.state = state
-        self.agent_execution.bind_state(state)
-        self.execution_history.clear()
+        if self._state is not None:
+            raise RuntimeError("Orchestrator is already bound.")
 
-    def _require_state(
-        self,
-    ) -> AgentState:
-        if self.state is None:
-            raise RuntimeError(
-                "AgentState is not bound. "
-                "Call bind_state() before execution."
+        if not context.user_request.strip():
+            raise ValueError("user_request cannot be empty.")
+
+        self._state = state
+        self._context = context
+
+    def run_iteration(self) -> ExecutionResult | None:
+        state = self._require_state()
+        runtime = self._require_context()
+
+        runtime.iteration += 1
+
+        if state.phase in {
+            AgentPhase.COMPLETED,
+            AgentPhase.FAILED,
+            AgentPhase.TERMINATED,
+        }:
+            return None
+
+        if state.phase == AgentPhase.IDLE:
+            state.transition(
+                AgentPhase.PLANNING,
+                reason="orchestration_started",
             )
-        return self.state
 
-    def _execution_fingerprint(
-        self,
-        step: PlanStep,
-    ) -> str:
-        step_type_val = (
-            step.step_type.value
-            if hasattr(step.step_type, "value")
-            else str(step.step_type)
-        )
-        tool_name_val = step.tool_name or "LLM"
+        final_context = self._build_context()
 
-        if step.step_type == StepType.TOOL:
-            args_fp = self._arguments_fingerprint(
-                step.arguments or {}
-            )
-            return f"TOOL | {tool_name_val} | {args_fp}"
-        else:
-            action_val = (step.action or "").strip().lower()
-            return f"LLM | {action_val}"
+        if runtime.plan_runtime.plan is None:
+            return self._create_plan(final_context)
 
-    def _has_seen_execution(
-        self,
-        step: PlanStep,
-    ) -> bool:
-        fp = self._execution_fingerprint(step)
-        return fp in self.execution_history
+        step = runtime.plan_runtime.current()
 
-    def _record_execution(
-        self,
-        step: PlanStep,
-    ) -> None:
-        """Record an execution in the history to prevent repeating it."""
-        self.execution_history.add(
-            self._execution_fingerprint(step)
-        )
+        if step is None:
+            return self._complete_plan()
 
-    def _check_recovery_budget(
-        self,
-        error: AgentError,
-    ) -> bool:
+        return self._execute_step(step, final_context)
+
+    def _build_context(self) -> FinalContext:
         state = self._require_state()
 
-        state.replan_count += 1
+        request = ContextRequestBuilder.from_state(state)
 
-        if state.replan_count > MAX_REPLANS:
-            state.fatal_error = True
-            state.tool_error = (
-                "Recovery budget exceeded "
-                f"(max replans: {MAX_REPLANS}). "
-                "Execution stopped to prevent an infinite loop."
-            )
-            state.execution_success = False
-            return False
+        return self._context_builder.build(request)
 
-        failure_key = (
-            f"{error.category.value}:"
-            f"{error.error_code or error.error_type}"
-        )
-
-        if (
-            state.last_failure_key == failure_key
-            and state.same_failure_count > 0
-        ):
-            state.same_failure_count += 1
-        else:
-            state.same_failure_count = 1
-            state.last_failure_key = failure_key
-
-        if state.same_failure_count > MAX_SAME_FAILURE:
-            state.fatal_error = True
-            state.tool_error = (
-                "The same failure recurred "
-                f"(max: {MAX_SAME_FAILURE}). Executing the same "
-                "strategy again would loop without new information."
-            )
-            state.execution_success = False
-            return False
-
-        return True
-
-    async def run_iteration(
+    def _create_plan(
         self,
-    ) -> None:
-        state = self._require_state()
-
-        span = self.tracer.start_span(
-            operation="orchestrator.iteration",
-            correlation_id=self.correlation_id,
-        )
+        context: FinalContext,
+    ) -> ExecutionResult | None:
+        runtime = self._require_context()
 
         try:
-            context = await self.context_builder.build(state)
-
-            self.metrics.increment("context_builds")
-
-            if not state.plan:
-                await self._create_plan(context.items)
-
-                if state.tool_error is not None:
-                    return
-
-            if state.current_step >= len(state.plan):
-                await self._handle_plan_completion()
-                return
-
-            step = state.plan[state.current_step]
-
-            loop_result = self.loop_detector.check(
-                action=step.action,
-                tool_name=step.tool_name,
-                arguments=step.arguments,
+            plan = self._planner.generate_plan(
+                runtime.user_request,
+                context,
             )
+        except PlannerRecoveryRequired as exc:
+            return self._handle_planner_failure(exc)
 
-            if loop_result.detected:
-                await self._handle_loop(loop_result.message)
-                return
+        self._validate_plan(plan)
 
-            self._prepare_step(step)
-            self._record_execution(step)
+        runtime.plan_runtime.plan = plan
+        runtime.plan_runtime.current_step = 0
 
-            result = await self.reliability_engine.execute(
-                operation=self.agent_execution.execute,
-                operation_name="agent_execution",
-                source="orchestrator",
-                validator=self._validate_execution_result,
-                recovery_operation=self._recover_execution,
+        if self._state_is_planning():
+            self._require_state().transition(
+                AgentPhase.EXECUTING,
+                reason="plan_created",
             )
-
-            if result.recovery_attempted:
-                await self._handle_execution_recovery(result)
-                return
-
-            if not result.success:
-                state.tool_error = result.reason
-
-                self.metrics.increment("agent_execution_failures")
-
-                self._emit_agent_failure(
-                    result.reason,
-                    error=result.error,
-                )
-
-                return
-
-            if state.blocked:
-                self.metrics.increment("execution_blocked")
-                return
-
-            self._capture_step_result(step)
-
-            self._mark_step_completed(step)
-
-        except Exception as exc:
-            error = self.error_handler.handle(
-                exc,
-                source="orchestrator",
-                operation="run_iteration",
-            )
-
-            state.tool_error = error.message
-
-            self.metrics.increment("agent_errors")
-
-            self._emit_agent_failure(
-                error.message,
-                error=error,
-            )
-
-        finally:
-            self.tracer.end_span(
-                span,
-                error=(
-                    state.tool_error
-                    if state.tool_error
-                    else None
-                ),
-            )
-
-    async def _create_plan(
-        self,
-        context: list[Any],
-    ) -> None:
-        state = self._require_state()
-
-        result = await self.reliability_engine.execute(
-            operation=lambda: self._generate_plan(
-                user_question=state.user_request,
-                context=context,
-            ),
-            operation_name="generate_plan",
-            source="planner",
-            validator=self._validate_plan_result,
-            recovery_operation=self._replan_full_plan,
-        )
-
-        if result.recovery_attempted:
-            if not result.success:
-                state.tool_error = result.reason
-                state.fatal_error = True
-
-                self.metrics.increment("planning_failures")
-
-                self._emit_agent_failure(
-                    result.reason,
-                    error=result.error,
-                )
-
-                return
-
-            if not isinstance(
-                result.result,
-                PlanSchema,
-            ):
-                error = self.error_handler.handle(
-                    TypeError(
-                        "Recovery produced an invalid "
-                        "plan type."
-                    ),
-                    source="planner",
-                    operation="replan",
-                )
-
-                state.tool_error = error.message
-
-                self.metrics.increment("planning_failures")
-
-                self._emit_agent_failure(
-                    error.message,
-                    error=error,
-                )
-
-                return
-
-            self._apply_full_plan(result.result)
-
-            return
-
-        if not result.success:
-            state.tool_error = result.reason
-
-            self.metrics.increment("planning_failures")
-
-            self._emit_agent_failure(
-                result.reason,
-                error=result.error,
-            )
-
-            return
-
-        plan = result.result
-
-        if not isinstance(
-            plan,
-            PlanSchema,
-        ):
-            error = self.error_handler.handle(
-                TypeError(
-                    "Planner returned an invalid "
-                    "result type."
-                ),
-                source="planner",
-                operation="generate_plan",
-            )
-
-            state.tool_error = error.message
-
-            self.metrics.increment("planning_failures")
-
-            self._emit_agent_failure(
-                error.message,
-                error=error,
-            )
-
-            return
-
-        self._apply_full_plan(plan)
-
-    async def _generate_plan(
-        self,
-        *,
-        user_question: str,
-        context: list[Any],
-    ) -> PlanSchema:
-        return await self.planner.generate_plan(
-            user_question=user_question,
-            context=context,
-        )
-
-    def _apply_full_plan(
-        self,
-        plan: PlanSchema,
-    ) -> None:
-        state = self._require_state()
-
-        state.plan = list(plan.steps)
-        state.current_step = 0
-        state.completed_steps.clear()
-
-        state.tool_result = None
-        state.tool_error = None
-
-        state.final_answer = None
-        state.final_answer_ready = False
-        state.final_answer_verified = False
-
-        state.blocked = False
-
-        state.execution_decision = None
-        state.approval_decision = None
-        state.risk_assessment = None
-
-        self.metrics.increment("plans_created")
-
-    async def _replan_full_plan(
-        self,
-        error: AgentError,
-    ) -> PlanSchema:
-        state = self._require_state()
-
-        if not self._check_recovery_budget(error):
-            raise ValueError(
-                state.tool_error or "Recovery budget exceeded."
-            )
-
-        context = await self.context_builder.build(state)
-
-        planner_items = context.items + list(
-            getattr(state, "evidence", []) or []
-        )
-
-        new_plan = await self.planner.replan(
-            user_question=state.user_request,
-            context=planner_items,
-            failed_step=(
-                state.plan[state.current_step]
-                if state.plan
-                else None
-            ),
-            failure=error,
-        )
-
-        self._validate_plan(new_plan)
-
-        loop_result = self.loop_detector.check_plan(
-            new_plan.steps
-        )
-
-        if loop_result.detected:
-            raise ValueError(
-                "Planner produced a repeated plan."
-            )
-
-        self._apply_full_plan(new_plan)
-
-        self.metrics.increment("replans")
-
-        return new_plan
-
-    def _validate_plan_result(
-        self,
-        plan: Any,
-    ) -> bool:
-        if not isinstance(
-            plan,
-            PlanSchema,
-        ):
-            return False
-
-        try:
-            self._validate_plan(plan)
-        except (ValueError, TypeError):
-            return False
-
-        loop_result = self.loop_detector.check_plan(
-            plan.steps
-        )
-
-        return not loop_result.detected
-
-    def _validate_plan(
-        self,
-        plan: PlanSchema,
-    ) -> None:
-        if not plan.steps:
-            raise ValueError(
-                "Plan must contain at least one step."
-            )
-
-        expected_step_id = 0
-
-        for step in plan.steps:
-            if step.step_id != expected_step_id:
-                raise ValueError(
-                    "Plan step IDs must be sequential "
-                    "starting from 0."
-                )
-
-            self._validate_step(step)
-
-            expected_step_id += 1
-
-    def _validate_step(
-        self,
-        step: PlanStep,
-    ) -> None:
-        if not step.action.strip():
-            raise ValueError(
-                f"Step {step.step_id} "
-                "has an empty action."
-            )
-
-        if step.step_type == StepType.TOOL:
-            if not step.tool_name:
-                raise ValueError(
-                    f"Tool step {step.step_id} "
-                    "must specify tool_name."
-                )
-
-        elif step.step_type == StepType.LLM:
-            if step.tool_name is not None:
-                raise ValueError(
-                    f"LLM step {step.step_id} "
-                    "must not specify tool_name."
-                )
-
-        else:
-            raise ValueError(
-                f"Unsupported step type: "
-                f"{step.step_type}"
-            )
-
-    async def _recover_execution(
-        self,
-        error: AgentError,
-    ) -> PlanStep:
-        state = self._require_state()
-
-        if state.current_step >= len(
-            state.plan
-        ):
-            raise ValueError(
-                "Cannot replan because the current "
-                "step does not exist."
-            )
-
-        failed_step = state.plan[
-            state.current_step
-        ]
-
-        budget_ok = self._check_recovery_budget(error)
-
-        if not budget_ok:
-            alternative = await self._force_different_strategy(
-                failed_step=failed_step,
-                error=error,
-            )
-
-            if alternative is None:
-                raise ValueError(
-                    state.tool_error
-                    or "Recovery budget exceeded."
-                )
-
-            state.fatal_error = False
-            state.tool_error = None
-
-            logger.info(
-                "Same failure repeated, switching to a different "
-                "strategy: %s (%s)",
-                alternative.action,
-                alternative.tool_name or "LLM",
-            )
-
-            return alternative
-
-        planner_items = await self._planner_context_items(
-            state
-        )
-
-        new_step = await self.planner.replan_step(
-            user_question=state.user_request,
-            context=planner_items,
-            failed_step=failed_step,
-            failure=error,
-        )
-
-        self._validate_step(
-            new_step
-        )
-       
-        if self._same_execution(new_step, failed_step) or self._has_seen_execution(new_step):
-            alternative = await self._force_different_strategy(
-                failed_step=failed_step,
-                error=error,
-            )
-
-            if alternative is not None:
-                logger.info(
-                    "Replan repeated the failed execution or saw historical execution; switching "
-                    "to a different strategy: %s (%s)",
-                    alternative.action,
-                    alternative.tool_name or "LLM",
-                )
-                return alternative
-
-        return new_step
-
-    def _same_execution(
-        self,
-        step_a: PlanStep | None,
-        step_b: PlanStep | None,
-    ) -> bool:
-        if step_a is None or step_b is None:
-            return False
-
-        if step_a.step_type != step_b.step_type:
-            return False
-
-        if (step_a.tool_name or None) != (
-            step_b.tool_name or None
-        ):
-            return False
-
-        if step_a.step_type == StepType.TOOL:
-            return (
-                self._arguments_fingerprint(
-                    step_a.arguments or {}
-                )
-                == self._arguments_fingerprint(
-                    step_b.arguments or {}
-                )
-            )
-
-        return (step_a.action or "").strip().lower() == (
-            step_b.action or ""
-        ).strip().lower()
-
-    @staticmethod
-    def _arguments_fingerprint(
-        arguments: dict[str, Any],
-    ) -> str:
-        try:
-            return json.dumps(
-                arguments,
-                sort_keys=True,
-                ensure_ascii=False,
-                default=str,
-            )
-        except Exception:
-            return repr(arguments)
-
-    async def _force_different_strategy(
-        self,
-        *,
-        failed_step: PlanStep,
-        error: AgentError,
-    ) -> PlanStep | None:
-        state = self._require_state()
-
-        alternative = self.planner.get_alternative_strategy(
-            user_question=state.user_request,
-            failed_step=failed_step,
-        )
-
-        if alternative is not None:
-            try:
-                self._validate_step(alternative)
-            except Exception as exc:
-                logger.warning(
-                    "Forced alternative strategy was invalid: %s",
-                    exc,
-                )
-                alternative = None
-
-        if alternative is not None and self._has_seen_execution(alternative):
-            logger.info("Forced alternative A was already executed, rejecting.")
-            alternative = None
-
-        if alternative is not None:
-            return alternative
-
-        has_evidence = any(
-            getattr(record, "succeeded", False)
-            and getattr(record, "result", None)
-            for record in (state.evidence or [])
-        )
-
-        if has_evidence:
-            evidence_step = PlanStep(
-                step_id=state.current_step,
-                action=(
-                    "Answer the task strictly from the evidence "
-                    "already gathered"
-                ),
-                step_type=StepType.LLM,
-                tool_name=None,
-                arguments={},
-                is_final_answer=True,
-            )
-            if not self._has_seen_execution(evidence_step):
-                return evidence_step
 
         return None
 
-    async def _handle_execution_recovery(
-        self,
-        result: Any,
-    ) -> None:
-        state = self._require_state()
-
-        if not result.success:
-            state.tool_error = result.reason
-
-            self.metrics.increment(
-                "recovery_failures"
-            )
-
-            self._emit_agent_failure(
-                result.reason,
-                error=result.error,
-            )
-
-            return
-
-        new_step = result.result
-
-        if not isinstance(
-            new_step,
-            PlanStep,
-        ):
-            error = self.error_handler.handle(
-                TypeError(
-                    "Recovery did not produce "
-                    "a PlanStep."
-                ),
-                source="orchestrator",
-                operation="execution_recovery",
-            )
-
-            state.tool_error = error.message
-
-            self.metrics.increment(
-                "recovery_failures"
-            )
-
-            self._emit_agent_failure(
-                error.message,
-                error=error,
-            )
-
-            return
-
-        if self._has_seen_execution(new_step):
-            alternative = await self._force_different_strategy(
-                failed_step=state.plan[state.current_step] if state.plan and state.current_step < len(state.plan) else new_step,
-                error=AgentError(error_type="DuplicateExecution", message="Recovery returned seen step", source="orchestrator", operation="execution_recovery")
-            )
-            if alternative is not None:
-                new_step = alternative
-            else:
-                error = self.error_handler.handle(
-                    ValueError("Recovery produced an already executed step, and no new strategy is available."),
-                    source="orchestrator",
-                    operation="execution_recovery",
-                )
-                state.tool_error = error.message
-                state.fatal_error = True
-                self.metrics.increment("recovery_failures")
-                return
-
-        self._replace_failed_step(
-            new_step
-        )
-
-        self._prepare_step(
-            new_step
-        )
-
-        state.tool_error = None
-        state.recovery_attempted = False
-
-        self.metrics.increment(
-            "step_replans"
-        )
-
-    def _replace_failed_step(
-        self,
-        new_step: PlanStep,
-    ) -> None:
-        state = self._require_state()
-
-        failed_index = state.current_step
-
-        replacement = PlanStep(
-            step_id=failed_index,
-            action=new_step.action,
-            step_type=new_step.step_type,
-            tool_name=new_step.tool_name,
-            arguments=dict(
-                new_step.arguments or {}
-            ),
-            is_final_answer=getattr(
-                new_step,
-                "is_final_answer",
-                False,
-            ),
-        )
-
-        state.plan[
-            failed_index
-        ] = replacement
-
-        if replacement.is_final_answer:
-            state.plan = state.plan[
-                : failed_index + 1
-            ]
-
-        state.tool_result = None
-        state.tool_error = None
-
-        state.blocked = False
-
-        state.execution_decision = None
-        state.approval_decision = None
-        state.risk_assessment = None
-
-    def _prepare_step(
+    def _execute_step(
         self,
         step: PlanStep,
-    ) -> None:
-        state = self._require_state()
+        context: FinalContext,
+    ) -> ExecutionResult:
+        runtime = self._require_context()
 
-        state.current_action = step.action
+        strategy_family = self._strategy_family(step)
 
-        state.step_type = step.step_type
-
-        state.tool_name = step.tool_name
-
-        state.tool_arguments = dict(
-            step.arguments or {}
-        )
-
-        state.tool_result = None
-        state.tool_error = None
-
-        state.blocked = False
-
-        state.execution_decision = None
-        state.approval_decision = None
-        state.risk_assessment = None
-
-    @staticmethod
-    def _validate_execution_result(
-        state: AgentState,
-    ) -> bool:
-        if state.blocked:
-            return False
-
-        if state.tool_error is not None:
-            return False
-
-        return bool(
-            getattr(state, "step_succeeded", False)
-            or getattr(state, "execution_success", False)
-        )
-
-    def _capture_step_result(
-        self,
-        step: PlanStep,
-    ) -> None:
-        state = self._require_state()
-
-        if not getattr(
+        if self._loop_detector.check(
             step,
-            "is_final_answer",
-            False,
+            strategy_family,
         ):
-            return
+            return self._handle_loop(step)
 
-        if state.tool_result is None:
-            raise ValueError(
-                "Final answer generation "
-                "returned no result."
+        request = ExecutionRequest(
+            step_id=step.id,
+            step_type=step.step_type,
+            action=step.action,
+            tool_name=step.tool_name,
+            arguments=step.arguments,
+            user_request=runtime.user_request,
+            context=context,
+            iteration=runtime.iteration,
+        )
+
+        result = self._agent_execution.execute(request)
+
+        runtime.record_execution(
+            ExecutionRecord(
+                step_id=step.id,
+                result=result,
+                iteration=runtime.iteration,
             )
-
-        candidate_answer = (
-            self.answer_sanitizer.sanitize(
-                str(state.tool_result)
-            )
-        )
-
-        if not candidate_answer.strip():
-            raise ValueError(
-                "Final answer generation "
-                "returned an empty result."
-            )
-
-        state.final_answer = candidate_answer
-        state.final_answer_ready = True
-
-    def _mark_step_completed(
-        self,
-        step: PlanStep,
-    ) -> None:
-        state = self._require_state()
-
-        if state.current_step not in (
-            state.completed_steps
-        ):
-            state.completed_steps.append(
-                state.current_step
-            )
-
-        state.current_step += 1
-
-        state.retry_count = 0
-        state.recovery_attempted = False
-
-        self.metrics.increment(
-            "steps_completed"
-        )
-
-    @staticmethod
-    def _build_verification_evidence(
-        *,
-        state: AgentState,
-        context_items: list[Any],
-    ) -> list[Any]:
-        evidence = list(
-            getattr(state, "evidence", []) or []
-        )
-
-        if not evidence:
-            return list(context_items)
-
-        return evidence + list(context_items)
-
-    @staticmethod
-    def _evidence_echoes_candidate(
-        item: Any,
-        candidate_text: str,
-    ) -> bool:
-        if not candidate_text:
-            return False
-        if getattr(item, "tool_name", None) == "llm":
-            return True
-        for attr in ("tool_result", "result", "content"):
-            value = getattr(item, attr, None)
-            if value is None:
-                continue
-            text = str(value).strip()
-            if text and text == candidate_text:
-                return True
-        return False
-
-    async def _planner_context_items(
-        self,
-        state: AgentState,
-    ) -> list[Any]:
-        context = await self.context_builder.build(
-            state
-        )
-        items = list(context.items)
-        evidence = list(
-            getattr(state, "evidence", []) or []
-        )
-        if evidence:
-            items = items + evidence
-        return items
-
-    async def _handle_plan_completion(
-        self,
-    ) -> None:
-        state = self._require_state()
-
-        if not state.final_answer_ready:
-            self._create_final_answer_step()
-            return
-
-        if not state.final_answer_verified:
-            await self._verify_final_answer()
-            return
-
-    def _create_final_answer_step(
-        self,
-    ) -> None:
-        state = self._require_state()
-
-        step_id = len(
-            state.plan
-        )
-
-        state.plan.append(
-            PlanStep(
-                step_id=step_id,
-                action=(
-                    "Generate final answer "
-                    "from gathered results."
-                ),
-                step_type=StepType.LLM,
-                tool_name=None,
-                arguments={},
-                is_final_answer=True,
-            )
-        )
-
-        self.metrics.increment(
-            "final_answer_generation_steps"
-        )
-
-    async def _verify_final_answer(
-        self,
-    ) -> None:
-        state = self._require_state()
-
-        state.verification_attempts = (
-            getattr(state, "verification_attempts", 0) + 1
-        )
-
-        if state.final_answer is None:
-            error = self.error_handler.handle(
-                ValueError(
-                    "Final answer is missing."
-                ),
-                source="verifier",
-                operation="verify_answer",
-            )
-
-            state.tool_error = error.message
-
-            self.metrics.increment(
-                "verification_failures"
-            )
-
-            self._emit_agent_failure(
-                error.message,
-                error=error,
-            )
-
-            return
-
-        context = await self.context_builder.build(
-            state
-        )
-
-        self.metrics.increment(
-            "verification_context_builds"
-        )
-
-        full_evidence = self._build_verification_evidence(
-            state=state,
-            context_items=context.items,
-        )
-
-        evidence_for_check = [
-            item
-            for item in full_evidence
-            if not self._evidence_echoes_candidate(
-                item,
-                state.final_answer,
-            )
-        ]
-
-        status, gate_reason = deterministic_verification(
-            candidate_answer=state.final_answer,
-            raw_data=evidence_for_check,
-        )
-
-        if status == VerificationStatus.PASS:
-            state.final_answer_ready = True
-            state.final_answer_verified = True
-            state.task_completed = True
-            state.tool_error = None
-            self.metrics.increment("answers_verified")
-            logger.info(
-                "Deterministic verification PASS: %s",
-                gate_reason,
-            )
-            return
-
-        if status == VerificationStatus.FAIL:
-            state.tool_error = gate_reason
-            self.metrics.increment("verification_failures")
-            self._emit_agent_failure(gate_reason)
-            error = AgentError(
-                error_type="AnswerVerificationError",
-                message=gate_reason,
-                source="verifier",
-                operation="verify_answer",
-                recoverable=True,
-            )
-            await self._handle_verification_failure(
-                error
-            )
-            return
-
-        verification_input = VerificationInput(
-            question=state.user_request,
-            candidate_answer=state.final_answer,
-            raw_data=full_evidence,
-        )
-
-        result = await self.reliability_engine.execute(
-            operation=lambda: self.verifier.verify(
-                verification_input
-            ),
-            operation_name="verify_answer",
-            source="verifier",
-            validator=self._validate_verification_result,
         )
 
         if not result.success:
-            state.tool_error = result.reason
-
-            self.metrics.increment(
-                "verification_failures"
+            return self._handle_execution_failure(
+                step=step,
+                result=result,
+                context=context,
             )
 
-            self._emit_agent_failure(
-                result.reason,
-                error=result.error,
+        runtime.plan_runtime.mark_completed(step.id)
+
+        if self._is_final_step(step):
+            return self._verify_final_answer(
+                step=step,
+                result=result,
+                context=context,
             )
 
-            return
+        runtime.plan_runtime.advance()
 
-        verification = result.result
+        return result
 
-        if verification is None:
-            state.tool_error = (
-                "Verifier returned no result."
-            )
-
-            self.metrics.increment(
-                "verification_failures"
-            )
-
-            return
-
-        if not verification.verified:
-            error = AgentError(
-                error_type="AnswerVerificationError",
-                message=verification.reason,
-                source="verifier",
-                operation="verify_answer",
-                recoverable=True,
-            )
-
-            await self._handle_verification_failure(
-                error
-            )
-
-            return
-
-        support = evidence_supports_candidate(
-            candidate_answer=state.final_answer,
-            raw_data=evidence_for_check,
-        )
-
-        if support is False:
-            reason = (
-                "LLM verification accepted the answer, but the "
-                "gathered tool evidence does not contain or support "
-                f"it ('{state.final_answer}')."
-            )
-
-            state.tool_error = reason
-
-            self.metrics.increment(
-                "verification_failures"
-            )
-
-            self._emit_agent_failure(reason)
-
-            await self._handle_verification_failure(
-                AgentError(
-                    error_type="AnswerVerificationError",
-                    message=reason,
-                    source="verifier",
-                    operation="verify_answer",
-                    recoverable=True,
-                )
-            )
-
-            return
-
-        state.final_answer_ready = True
-        state.final_answer_verified = True
-        state.task_completed = True
-        state.tool_error = None
-
-        self.metrics.increment(
-            "answers_verified"
-        )
-
-    async def _handle_verification_failure(
+    def _handle_execution_failure(
         self,
-        error: AgentError,
-    ) -> None:
-        state = self._require_state()
+        *,
+        step: PlanStep,
+        result: ExecutionResult,
+        context: FinalContext,
+    ) -> ExecutionResult:
+        if result.error is None:
+            return result
 
-        if (
-            getattr(state, "verification_attempts", 0)
-            >= MAX_VERIFICATION_ATTEMPTS
-        ):
-            state.final_answer_ready = True
-            state.final_answer_verified = False
-            state.task_completed = False
+        runtime = self._require_context()
 
-            state.tool_error = (
-                "Verification attempts exhausted; "
-                "final answer remains unverified."
+        reliability_result = self._reliability.handle_failure(
+            error=result.error,
+            attempt=runtime.iteration,
+        )
+
+        if reliability_result.recovered:
+            return self._execute_recovered_step(
+                step=step,
+                context=context,
             )
 
-            self.metrics.increment(
-                "answers_unverified"
-            )
+        if reliability_result.result is not None:
+            return reliability_result.result
 
-            logger.warning(
-                "Verification attempts exhausted (%d); "
-                "final answer remains UNVERIFIED.",
-                state.verification_attempts,
-            )
+        return result
 
-            return
+    def _execute_recovered_step(
+        self,
+        *,
+        step: PlanStep,
+        context: FinalContext,
+    ) -> ExecutionResult:
+        runtime = self._require_context()
 
-        if not self._check_recovery_budget(error):
-            self.metrics.increment(
-                "verification_failures"
-            )
-            self._emit_agent_failure(
-                state.tool_error or "Recovery budget exceeded.",
-                error=error,
-            )
-            return
+        request = ExecutionRequest(
+            step_id=step.id,
+            step_type=step.step_type,
+            action=step.action,
+            tool_name=step.tool_name,
+            arguments=step.arguments,
+            user_request=runtime.user_request,
+            context=context,
+            iteration=runtime.iteration,
+            metadata={"recovered": True},
+        )
 
-        classification = (
-            self.reliability_engine.failure_classifier.classify(
-                error
+        result = self._agent_execution.execute(request)
+
+        runtime.record_execution(
+            ExecutionRecord(
+                step_id=step.id,
+                result=result,
+                iteration=runtime.iteration,
             )
         )
 
-        recovery_decision = (
-            self.reliability_engine.recovery_policy.evaluate(
-                classification
+        if result.success:
+            runtime.plan_runtime.mark_completed(step.id)
+
+            if not self._is_final_step(step):
+                runtime.plan_runtime.advance()
+
+        return result
+
+    def _verify_final_answer(
+        self,
+        *,
+        step: PlanStep,
+        result: ExecutionResult,
+        context: FinalContext,
+    ) -> ExecutionResult:
+        runtime = self._require_context()
+
+        answer = self._extract_answer(result)
+
+        if answer is None:
+            return self._verification_failure(
+                step=step,
+                answer="",
+                reason="final_answer_missing",
             )
+
+        if self._state_is_executing():
+            self._require_state().transition(
+                AgentPhase.VERIFYING,
+                reason="final_answer_generated",
+            )
+
+        verification = self._verifier.verify(
+            user_question=runtime.user_request,
+            candidate_answer=answer,
+            context=context,
+            evidence=result.evidence,
         )
 
-        if recovery_decision.action.name != "REPLAN":
-            state.tool_error = (
-                recovery_decision.reason
+        record = VerificationRecord(
+            attempt=runtime.verification_attempts + 1,
+            verified=verification.verified,
+            result=verification,
+            answer=answer,
+        )
+
+        runtime.record_verification(record)
+
+        if verification.verified:
+            runtime.final_answer = answer
+
+            self._require_state().transition(
+                AgentPhase.COMPLETED,
+                reason="answer_verified",
             )
 
-            self.metrics.increment(
-                "verification_failures"
+            return result
+
+        return self._verification_failure(
+            step=step,
+            answer=answer,
+            reason="answer_verification_failed",
+        )
+
+    def _verification_failure(
+        self,
+        *,
+        step: PlanStep,
+        answer: str,
+        reason: str,
+    ) -> ExecutionResult:
+        runtime = self._require_context()
+
+        if runtime.verification_attempts >= 2:
+            self._require_state().transition(
+                AgentPhase.FAILED,
+                reason="verification_budget_exhausted",
             )
 
-            self._emit_agent_failure(
-                recovery_decision.reason,
-                error=error,
+            return ExecutionResult(
+                success=False,
+                output=answer,
+                step_id=step.id,
+                error=RuntimeError(
+                    "Final answer verification failed."
+                ),
             )
 
-            return
-
-        failed_step = self._find_final_answer_step()
-
-        if failed_step is None:
-            state.tool_error = (
-                "Final answer step could not be found."
-            )
-
-            self.metrics.increment(
-                "verification_failures"
-            )
-
-            self._emit_agent_failure(
-                state.tool_error,
-                error=error,
-            )
-
-            return
-
-        planner_items = await self._planner_context_items(
-            state
+        self._require_state().transition(
+            AgentPhase.PLANNING,
+            reason=reason,
         )
 
         try:
-            new_step = await self.planner.replan_step(
-                user_question=state.user_request,
-                context=planner_items,
-                failed_step=failed_step,
-                failure=error,
+            context = self._build_context()
+
+            plan = self._planner.replan(
+                user_question=runtime.user_request,
+                context=context,
+                failed_step=step,
+                failure=reason,
             )
 
-            self._validate_step(
-                new_step
+            self._validate_plan(plan)
+
+            runtime.plan_runtime.plan = plan
+            runtime.plan_runtime.current_step = 0
+
+            self._require_state().transition(
+                AgentPhase.EXECUTING,
+                reason="verification_replan_created",
             )
 
-        except Exception as exc:
-            recovery_error = self.error_handler.handle(
-                exc,
-                source="planner",
-                operation="replan_step",
+        except PlannerRecoveryRequired as exc:
+            self._require_state().transition(
+                AgentPhase.FAILED,
+                reason="verification_replan_failed",
             )
 
-            state.tool_error = (
-                recovery_error.message
+            return ExecutionResult(
+                success=False,
+                output=answer,
+                step_id=step.id,
+                error=exc,
             )
 
-            self.metrics.increment(
-                "verification_recovery_failures"
-            )
-
-            self._emit_agent_failure(
-                recovery_error.message,
-                error=recovery_error,
-            )
-
-            return
-
-        if self._has_seen_execution(new_step):
-            alternative = await self._force_different_strategy(
-                failed_step=failed_step,
-                error=error,
-            )
-            if alternative is not None:
-                new_step = alternative
-            else:
-                state.tool_error = "Verification replan produced an already executed step."
-                self.metrics.increment("verification_recovery_failures")
-                return
-
-        self._replace_failed_step(
-            new_step
+        return ExecutionResult(
+            success=False,
+            output=answer,
+            step_id=step.id,
+            metadata={"replanned": True},
         )
 
-        self._prepare_step(
-            new_step
-        )
+    def _complete_plan(self) -> ExecutionResult | None:
+        runtime = self._require_context()
 
-        state.final_answer = None
-        state.final_answer_ready = False
-        state.final_answer_verified = False
-
-        self.metrics.increment(
-            "answer_replans"
-        )
-
-    def _find_final_answer_step(
-        self,
-    ) -> PlanStep | None:
-        state = self._require_state()
-
-        for step in reversed(
-            state.plan
-        ):
-            if getattr(
-                step,
-                "is_final_answer",
-                False,
-            ):
-                return step
+        if runtime.final_answer is not None:
+            return ExecutionResult(
+                success=True,
+                output=runtime.final_answer,
+            )
 
         return None
 
-    @staticmethod
-    def _validate_verification_result(
-        result: Any,
-    ) -> bool:
-        return isinstance(
-            result,
-            VerificationResult,
-        )
-
-    async def _handle_loop(
+    def _handle_planner_failure(
         self,
-        reason: str,
-    ) -> None:
-        state = self._require_state()
-
-        if not self._check_recovery_budget(
-            AgentError(
-                error_type="LoopDetected",
-                message=reason,
-                source="loop_detector",
-                operation="execution",
-            )
-        ):
-            if (
-                not state.loop_salvage_attempted
-                and state.evidence
-                and not state.final_answer_ready
-            ):
-                final_step = self._find_final_answer_step()
-
-                if final_step is not None:
-                    state.loop_salvage_attempted = True
-
-                    for idx, candidate in enumerate(
-                        state.plan
-                    ):
-                        if candidate is final_step:
-                            state.current_step = idx
-                            break
-
-                    state.fatal_error = False
-                    state.tool_error = None
-
-                    self._prepare_step(final_step)
-
-                    self.metrics.increment(
-                        "loop_salvages"
-                    )
-
-                    return
-
-            self.metrics.increment(
-                "loop_recovery_failures"
-            )
-            self._emit_agent_failure(
-                state.tool_error or "Recovery budget exceeded."
-            )
-            return
-
-        error = AgentError(
-            error_type="LoopDetected",
-            message=reason,
-            source="loop_detector",
-            operation="execution",
-            recoverable=True,
+        error: Exception,
+    ) -> ExecutionResult:
+        self._require_state().transition(
+            AgentPhase.FAILED,
+            reason="planner_failure",
         )
 
-        classification = (
-            self.reliability_engine.failure_classifier.classify(
-                error
-            )
+        return ExecutionResult(
+            success=False,
+            error=error,
         )
 
-        recovery_decision = (
-            self.reliability_engine.recovery_policy.evaluate(
-                classification
-            )
+    def _handle_loop(
+        self,
+        step: PlanStep,
+    ) -> ExecutionResult:
+        self._require_state().transition(
+            AgentPhase.FAILED,
+            reason="execution_loop_detected",
         )
 
-        if recovery_decision.action.name != "REPLAN":
-            state.tool_error = (
-                recovery_decision.reason
-            )
+        return ExecutionResult(
+            success=False,
+            step_id=step.id,
+            error=RuntimeError(
+                f"Execution loop detected at step {step.id}."
+            ),
+        )
 
-            self.metrics.increment(
-                "loop_recovery_failures"
-            )
+    @staticmethod
+    def _validate_plan(plan: PlanSchema) -> None:
+        if not plan.steps:
+            raise ValueError("Planner returned an empty plan.")
 
-            self._emit_agent_failure(
-                recovery_decision.reason,
-                error=error,
-            )
-
-            return
-
-        if state.current_step >= len(
-            state.plan
-        ):
-            state.tool_error = (
-                "Loop recovery has no current step."
-            )
-
-            self.metrics.increment(
-                "loop_recovery_failures"
-            )
-
-            self._emit_agent_failure(
-                state.tool_error,
-                error=error,
-            )
-
-            return
-
-        failed_step = state.plan[
-            state.current_step
+        final_steps = [
+            step
+            for step in plan.steps
+            if step.step_type == StepType.LLM
+            and step.id == len(plan.steps) - 1
         ]
 
-        planner_items = await self._planner_context_items(
-            state
-        )
-
-        try:
-            new_step = await self.planner.replan_step(
-                user_question=state.user_request,
-                context=planner_items,
-                failed_step=failed_step,
-                failure=error,
+        if len(final_steps) != 1:
+            raise ValueError(
+                "Plan must contain exactly one final LLM step."
             )
 
-            self._validate_step(
-                new_step
-            )
+    @staticmethod
+    def _is_final_step(step: PlanStep) -> bool:
+        return step.step_type == StepType.LLM
 
-        except Exception as exc:
-            recovery_error = self.error_handler.handle(
-                exc,
-                source="planner",
-                operation="replan_step",
-            )
+    @staticmethod
+    def _strategy_family(step: PlanStep) -> str:
+        if step.tool_name:
+            return step.tool_name
 
-            state.tool_error = (
-                recovery_error.message
-            )
+        return "llm"
 
-            self.metrics.increment(
-                "loop_recovery_failures"
-            )
+    @staticmethod
+    def _extract_answer(
+        result: ExecutionResult,
+    ) -> str | None:
+        if result.output is None:
+            return None
 
-            self._emit_agent_failure(
-                recovery_error.message,
-                error=recovery_error,
-            )
+        if isinstance(result.output, str):
+            answer = result.output.strip()
+            return answer or None
 
-            return
+        return str(result.output)
 
-        if self._has_seen_execution(new_step):
-            alternative = await self._force_different_strategy(
-                failed_step=failed_step,
-                error=error,
-            )
-            if alternative is not None:
-                new_step = alternative
-            else:
-                state.tool_error = "Loop recovery replan produced an already executed step."
-                self.metrics.increment("loop_recovery_failures")
-                return
+    def _state_is_planning(self) -> bool:
+        return self._require_state().phase == AgentPhase.PLANNING
 
-        self._replace_failed_step(
-            new_step
-        )
+    def _state_is_executing(self) -> bool:
+        return self._require_state().phase == AgentPhase.EXECUTING
 
-        self._prepare_step(
-            new_step
-        )
+    def _require_state(self) -> AgentState:
+        if self._state is None:
+            raise RuntimeError("Orchestrator is not bound.")
 
-        self.metrics.increment(
-            "loop_recoveries"
-        )
+        return self._state
 
-    def emit_agent_started(
-        self,
-    ) -> None:
-        state = self._require_state()
+    def _require_context(self) -> OrchestrationContext:
+        if self._context is None:
+            raise RuntimeError("Orchestrator is not bound.")
 
-        self.event_logger.log(
-            create_event(
-                event_type=EventType.AGENT_STARTED,
-                correlation_id=self.correlation_id,
-                iteration=state.iteration,
-            )
-        )
-
-        self.metrics.increment(
-            "agents_started"
-        )
-
-    def emit_agent_completed(
-        self,
-    ) -> None:
-        state = self._require_state()
-
-        self.event_logger.log(
-            create_event(
-                event_type=EventType.AGENT_COMPLETED,
-                correlation_id=self.correlation_id,
-                iteration=state.iteration,
-                metadata={
-                    "final_answer_verified":
-                        state.final_answer_verified,
-                    "completed_steps":
-                        len(
-                            state.completed_steps
-                        ),
-                },
-            )
-        )
-
-        self.metrics.increment(
-            "agents_completed"
-        )
-
-    def _emit_agent_failure(
-        self,
-        reason: str,
-        error: AgentError | None = None,
-    ) -> None:
-        state = self._require_state()
-
-        self.event_logger.log(
-            create_event(
-                event_type=EventType.AGENT_FAILED,
-                correlation_id=self.correlation_id,
-                iteration=state.iteration,
-                error=reason,
-                metadata={
-                    "error_type": (
-                        error.error_type
-                        if error
-                        else None
-                    ),
-                    "source": (
-                        error.source
-                        if error
-                        else None
-                    ),
-                    "operation": (
-                        error.operation
-                        if error
-                        else None
-                    ),
-                },
-            )
-        )
+        return self._context
