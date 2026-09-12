@@ -6,9 +6,7 @@ from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
-
 from gaia_agent.llm.client import LLMClient
-from gaia_agent.llm.model import LLMModel
 
 
 class VerificationStatus(str, Enum):
@@ -26,25 +24,12 @@ class VerificationStatus(str, Enum):
 class VerificationResult(BaseModel):
     status: VerificationStatus | None = None
     verified: bool | None = None
-    reason: str = Field(
-        description="Brief explanation for the verification decision."
-    )
+    reason: str = ""
 
     @model_validator(mode="after")
-    def normalize(self) -> VerificationResult:
-        if self.status is None and self.verified is not None:
-            self.status = (
-                VerificationStatus.VERIFIED
-                if self.verified
-                else VerificationStatus.INVALID
-            )
-
-        if self.status is None:
-            self.status = VerificationStatus.INSUFFICIENT_EVIDENCE
-
-        if self.verified is None:
+    def normalize(self) -> "VerificationResult":
+        if self.status is not None:
             self.verified = self.status == VerificationStatus.VERIFIED
-
         return self
 
 
@@ -52,701 +37,503 @@ class VerificationInput(BaseModel):
     question: str
     candidate_answer: str
     raw_data: list[Any] = Field(default_factory=list)
-    task_type: str | None = None
+    task_type: str
 
 
 class EvidenceItem(BaseModel):
     tool_name: str
-    result: Any
+    result: Any = None
     artifact_id: str | None = None
     source_type: str | None = None
     succeeded: bool = True
+    step_id: str | None = None
+    execution_id: str | None = None
+    attempt_id: str | None = None
+    run_id: str | None = None
+    plan_version: int | None = None
+    step_status: str | None = None
+    relevant: bool | None = None
 
-
-_STRONG_TOOL_NAMES = frozenset(
-    {
-        "python_interpreter",
-        "analyze_excel",
-        "file_reader",
-        "analyze_image",
-        "audio_reader",
-        "transcribe_audio",
-        "video_reader",
-        "analyze_video",
-        "youtube_transcript",
-    }
-)
 
 _NUMBER_RE = re.compile(
-    r"""
-    -?
-    (?:
-        \d{1,3}(?:,\d{3})+
-        |
-        \d+
-    )
-    (?:\.\d+)?
-    (?:[eE][+-]?\d+)?
-    """,
-    re.VERBOSE,
+    r"(?<![\w.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?(?![\w.])"
 )
 
+_STRONG_TOOL_NAMES = {
+    "python_interpreter", "analyze_excel", "file_reader", "analyze_image",
+    "audio_reader", "transcribe_audio", "video_reader", "analyze_video",
+    "youtube_transcript",
+}
 
-def _extract_numbers(text: str) -> list[float]:
-    if not text:
-        return []
-
-    numbers: list[float] = []
-
-    for match in _NUMBER_RE.finditer(str(text)):
-        raw_value = match.group(0).replace(",", "")
-
-        try:
-            numbers.append(float(raw_value))
-        except ValueError:
-            continue
-
-    return numbers
+_SEMANTIC_TOOL_NAMES = _STRONG_TOOL_NAMES | {
+    "web_search", "browser", "http", "http_get", "github",
+}
 
 
-def _normalize_text(text: str) -> str:
-    text = str(text)
-    text = text.casefold()
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def _get_field(
-    item: Any,
-    name: str,
-    default: Any = None,
-) -> Any:
+def _get_field(item: Any, name: str, default: Any = None) -> Any:
     if isinstance(item, dict):
         return item.get(name, default)
-
     return getattr(item, name, default)
 
 
 def _get_tool_name(item: Any) -> str | None:
     value = _get_field(item, "tool_name")
-
-    if value is None:
-        return None
-
-    value = str(value).strip()
-
-    return value or None
+    return None if value is None else str(value).strip().lower()
 
 
 def _get_result(item: Any) -> Any:
-    return _get_field(item, "result")
+    value = _get_field(item, "result", None)
+    return value if value is not None else _get_field(item, "output", None)
 
 
 def _get_succeeded(item: Any) -> bool:
-    return bool(_get_field(item, "succeeded", True))
+    value = _get_field(item, "succeeded", None)
+    if value is not None:
+        return bool(value)
+    value = _get_field(item, "success", None)
+    return True if value is None else bool(value)
 
 
-def _get_artifact_id(item: Any) -> str | None:
-    value = _get_field(item, "artifact_id")
+def _get_str(item: Any, name: str) -> str | None:
+    value = _get_field(item, name)
+    return None if value is None else str(value)
 
+
+def _get_plan_version(item: Any) -> int | None:
+    value = _get_field(item, "plan_version")
     if value is None:
         return None
-
-    value = str(value).strip()
-
-    return value or None
-
-
-def _get_source_type(item: Any) -> str | None:
-    value = _get_field(item, "source_type")
-
-    if value is None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
-    value = str(value).strip()
 
-    return value or None
+def _get_relevant(item: Any) -> bool | None:
+    value = _get_field(item, "relevant")
+    return None if value is None else bool(value)
 
 
-def _iter_successful_evidence(
-    raw_data: list[Any],
-) -> list[EvidenceItem]:
-    evidence: list[EvidenceItem] = []
-
-    for item in raw_data or []:
-        tool_name = _get_tool_name(item)
-
-        if not tool_name:
+def _iter_successful_evidence(raw_data: list[Any]):
+    """Exclude LLM output, failed execution and explicitly irrelevant data."""
+    for item in raw_data:
+        tool = _get_tool_name(item)
+        if not tool or tool == "llm":
             continue
-
-        if tool_name.casefold() == "llm":
-            continue
-
         if not _get_succeeded(item):
             continue
-
-        result = _get_result(item)
-
-        if result is None:
+        if _get_relevant(item) is False:
             continue
-
-        evidence.append(
-            EvidenceItem(
-                tool_name=tool_name,
-                result=result,
-                artifact_id=_get_artifact_id(item),
-                source_type=_get_source_type(item),
-                succeeded=True,
-            )
-        )
-
-    return evidence
+        if _get_result(item) is None:
+            continue
+        yield item
 
 
-def _iter_strong_evidence(
-    raw_data: list[Any],
-) -> list[EvidenceItem]:
-    successful = _iter_successful_evidence(raw_data)
+def _filter_current_evidence(raw_data: list[Any]) -> list[Any]:
+    """Drop stale evidence when execution/replan identity is available."""
+    evidence = list(_iter_successful_evidence(raw_data))
+    if not evidence:
+        return []
 
-    strong_names = {
-        name.casefold()
-        for name in _STRONG_TOOL_NAMES
-    }
+    # Keep the newest coherent identity while allowing legacy evidence that has
+    # no identity metadata at all. This makes the verifier backward compatible.
+    for field in ("run_id", "execution_id", "attempt_id"):
+        values = [_get_str(x, field) for x in evidence]
+        values = [x for x in values if x]
+        if values:
+            newest = values[-1]
+            evidence = [x for x in evidence if _get_str(x, field) in (None, newest)]
 
+    versions = [_get_plan_version(x) for x in evidence]
+    versions = [x for x in versions if x is not None]
+    if versions:
+        newest = max(versions)
+        evidence = [x for x in evidence if _get_plan_version(x) in (None, newest)]
+
+    # A failed step must never leak back in through a success alias.
+    valid = {"", "success", "succeeded", "completed", "complete", "ok", "verified"}
     return [
-        item
-        for item in successful
-        if item.tool_name.casefold() in strong_names
+        x for x in evidence
+        if (_get_str(x, "step_status") or "").strip().lower() in valid
     ]
 
 
-def _distinct_numbers(
-    numbers: list[float],
-) -> list[float]:
-    result: list[float] = []
+def _iter_strong_evidence(raw_data: list[Any]):
+    for item in _filter_current_evidence(raw_data):
+        if _get_tool_name(item) in _STRONG_TOOL_NAMES:
+            yield item
 
-    for number in numbers:
-        if any(
-            abs(number - existing) < 1e-9
-            for existing in result
-        ):
+
+def _extract_numbers(value: Any) -> list[str]:
+    return [] if value is None else _NUMBER_RE.findall(str(value))
+
+
+def _normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", "" if value is None else str(value).strip().lower())
+
+
+def _distinct_numbers(numbers: list[str]) -> list[str]:
+    result: list[str] = []
+    for raw in numbers:
+        try:
+            normalized = format(float(raw), ".15g")
+        except (TypeError, ValueError):
             continue
-
-        result.append(number)
-
+        if normalized not in result:
+            result.append(normalized)
     return result
 
 
-def _candidate_is_single_number(
-    candidate: str,
-) -> tuple[bool, float | None]:
-    candidate = candidate.strip()
-
-    if not candidate:
-        return False, None
-
-    match = _NUMBER_RE.fullmatch(candidate)
-
-    if not match:
-        return False, None
-
+def _numbers_equal(left: str, right: str) -> bool:
     try:
-        return (
-            True,
-            float(match.group(0).replace(",", "")),
-        )
-    except ValueError:
-        return False, None
+        return float(left) == float(right)
+    except (TypeError, ValueError):
+        return left == right
 
 
-def deterministic_verification(
-    candidate_answer: str | None,
-    raw_data: list[Any],
-) -> tuple[VerificationStatus, str]:
-    if candidate_answer is None:
-        return (
-            VerificationStatus.FAIL,
-            "Candidate answer is missing.",
-        )
+def _candidate_is_single_number(candidate: str) -> bool:
+    numbers = _extract_numbers(candidate)
+    return len(numbers) == 1 and _normalize_text(candidate) == _normalize_text(numbers[0])
 
-    candidate = str(candidate_answer).strip()
 
-    if not candidate:
-        return (
-            VerificationStatus.FAIL,
-            "Candidate answer is empty.",
-        )
+def _find_explicit_labeled_numbers(text: str) -> list[str]:
+    patterns = [
+        r"\b(?:final\s+)?(?:answer|result|score|value|total|output)\s*(?:is|=|:)\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)",
+        r"\b(?:calculated|computed)\s+(?:answer|result|value|score)\s*(?:is|=|:)\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)",
+        r"\bcalculation\s+[A-Za-z0-9_-]+\s*(?:is|=|:)\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)",
+        r'"(?:answer|final_answer|result|output)"\s*:\s*"?([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"?',
+    ]
+    out: list[str] = []
+    for pattern in patterns:
+        out.extend(re.findall(pattern, text, flags=re.IGNORECASE))
+    return out
 
-    strong_evidence = _iter_strong_evidence(raw_data)
 
-    if not strong_evidence:
-        return (
-            VerificationStatus.UNCERTAIN,
-            "No strong deterministic tool evidence is available.",
-        )
-
-    is_numeric, candidate_value = _candidate_is_single_number(
-        candidate
+def _is_intermediate(text: str, number: str) -> bool:
+    escaped = re.escape(number)
+    patterns = (
+        rf"(?:intermediate|partial|subtotal|sub-result|subresult|step)\s*.{{0,100}}{escaped}",
+        rf"{escaped}.{{0,100}}(?:intermediate|partial|subtotal|sub-result|subresult|step)",
     )
-
-    if is_numeric and candidate_value is not None:
-        evidence_numbers: list[float] = []
-
-        for item in strong_evidence:
-            evidence_numbers.extend(
-                _extract_numbers(
-                    str(item.result)
-                )
-            )
-
-        distinct_numbers = _distinct_numbers(
-            evidence_numbers
-        )
-
-        if not distinct_numbers:
-            return (
-                VerificationStatus.UNCERTAIN,
-                "No numeric value was found in the strong deterministic evidence.",
-            )
-
-        if len(distinct_numbers) > 1:
-            return (
-                VerificationStatus.UNCERTAIN,
-                "The deterministic evidence contains multiple distinct numeric values.",
-            )
-
-        evidence_value = distinct_numbers[0]
-
-        if abs(candidate_value - evidence_value) < 1e-9:
-            return (
-                VerificationStatus.PASS,
-                "The candidate matches the single numeric value directly supported by deterministic evidence.",
-            )
-
-        return (
-            VerificationStatus.FAIL,
-            "The deterministic evidence contradicts the candidate: "
-            f"evidence={evidence_value:g}, "
-            f"candidate={candidate_value:g}.",
-        )
-
-    normalized_candidate = _normalize_text(
-        candidate
-    )
-
-    for item in strong_evidence:
-        normalized_evidence = _normalize_text(
-            str(item.result)
-        )
-
-        if normalized_candidate == normalized_evidence:
-            return (
-                VerificationStatus.PASS,
-                "The candidate directly matches the evidence.",
-            )
-
-        pattern = (
-            rf"\b{re.escape(normalized_candidate)}\b"
-        )
-
-        if re.search(
-            pattern,
-            normalized_evidence,
-        ):
-            return (
-                VerificationStatus.PASS,
-                "The candidate directly matches a textual value in deterministic evidence.",
-            )
-
-    return (
-        VerificationStatus.UNCERTAIN,
-        "The deterministic evidence does not directly establish the textual candidate.",
-    )
+    lowered = text.lower()
+    return any(re.search(p, lowered) for p in patterns)
 
 
-def evidence_supports_candidate(
-    candidate_answer: str | None,
-    raw_data: list[Any],
-) -> bool | None:
-    status, _ = deterministic_verification(
-        candidate_answer=candidate_answer,
-        raw_data=raw_data,
-    )
-
-    if status == VerificationStatus.VERIFIED:
+def _check_source_support(data: VerificationInput, evidence: list[Any]) -> bool:
+    task_type = data.task_type.strip().upper()
+    if task_type in {"TEXT", "GENERAL", "UNKNOWN"}:
         return True
+    required = {
+        "IMAGE": {"analyze_image"},
+        "VISION": {"analyze_image"},
+        "AUDIO": {"audio_reader", "transcribe_audio"},
+        "VIDEO": {"video_reader", "analyze_video", "youtube_transcript"},
+    }.get(task_type)
+    return True if required is None else any(_get_tool_name(x) in required for x in evidence)
 
-    if status == VerificationStatus.INVALID:
+
+def deterministic_verification(candidate_answer: str, raw_data: list[Any]) -> VerificationResult:
+    """Conservative proof layer. Ambiguous semantics go to the LLM verifier."""
+    candidate = candidate_answer.strip()
+    if not candidate:
+        return VerificationResult(status=VerificationStatus.INVALID, reason="The candidate answer is empty.")
+
+    strong = list(_iter_strong_evidence(raw_data))
+    if not strong:
+        return VerificationResult(
+            status=VerificationStatus.INSUFFICIENT_EVIDENCE,
+            reason="No successful current strong evidence is available for deterministic verification.",
+        )
+
+    if _candidate_is_single_number(candidate):
+        candidate_number = _extract_numbers(candidate)[0]
+        explicit: list[str] = []
+        appears = False
+        intermediate = False
+
+        for item in strong:
+            text = str(_get_result(item))
+            nums = _extract_numbers(text)
+            appears |= any(_numbers_equal(candidate_number, n) for n in nums)
+            intermediate |= _is_intermediate(text, candidate_number)
+            explicit.extend(_find_explicit_labeled_numbers(text))
+
+        normalized = _distinct_numbers(explicit)
+        if not normalized:
+            if intermediate:
+                return VerificationResult(
+                    status=VerificationStatus.INSUFFICIENT_EVIDENCE,
+                    reason="The candidate appears as an intermediate/partial value, not an established final answer.",
+                )
+            if appears:
+                return VerificationResult(
+                    status=VerificationStatus.INSUFFICIENT_EVIDENCE,
+                    reason="The candidate appears in strong evidence but is not explicitly established as the final result.",
+                )
+            return VerificationResult(
+                status=VerificationStatus.INVALID,
+                reason="The current strong evidence does not contain the candidate value.",
+            )
+
+        if len(normalized) > 1:
+            return VerificationResult(
+                status=VerificationStatus.CONFLICTING_EVIDENCE,
+                reason="Multiple explicitly labelled result values require semantic resolution.",
+            )
+
+        if _numbers_equal(candidate_number, normalized[0]):
+            return VerificationResult(
+                status=VerificationStatus.VERIFIED,
+                reason="The candidate is explicitly supported by a labelled result in current strong evidence.",
+            )
+        return VerificationResult(
+            status=VerificationStatus.INVALID,
+            reason="The candidate is contradicted by the explicitly labelled result in current strong evidence.",
+        )
+
+    normalized_candidate = _normalize_text(candidate)
+    exact = False
+    appears = False
+    for item in strong:
+        text = _normalize_text(_get_result(item))
+        exact |= text == normalized_candidate
+        appears |= bool(re.search(rf"\b{re.escape(normalized_candidate)}\b", text))
+
+    if exact:
+        return VerificationResult(status=VerificationStatus.VERIFIED, reason="The candidate exactly matches strong evidence.")
+    if appears:
+        return VerificationResult(
+            status=VerificationStatus.INSUFFICIENT_EVIDENCE,
+            reason="The candidate appears in evidence, but occurrence alone does not establish semantic support.",
+        )
+    return VerificationResult(
+        status=VerificationStatus.INSUFFICIENT_EVIDENCE,
+        reason="The deterministic verifier cannot establish semantic support for the textual candidate.",
+    )
+
+
+def evidence_supports_candidate(candidate_answer: str, raw_data: list[Any]) -> bool | None:
+    result = deterministic_verification(candidate_answer, raw_data)
+    if result.status == VerificationStatus.VERIFIED:
+        return True
+    if result.status == VerificationStatus.INVALID:
         return False
-
-    return None
-
-
-def _normalize_task_type(
-    task_type: str | None,
-) -> str:
-    if not task_type:
-        return ""
-
-    return str(task_type).strip().upper()
-
-
-def _check_source_support(
-    data: VerificationInput,
-) -> VerificationResult | None:
-    task_type = _normalize_task_type(data.task_type)
-
-    evidence = _iter_successful_evidence(data.raw_data)
-
-    tool_names = {
-        item.tool_name.casefold()
-        for item in evidence
-    }
-
-    if task_type in {"IMAGE", "VISION"}:
-        if "analyze_image" not in tool_names:
-            return VerificationResult(
-                status=VerificationStatus.UNSUPPORTED,
-                reason=(
-                    "The task requires image evidence, "
-                    "but no successful image-analysis "
-                    "evidence is available."
-                ),
-            )
-
-    if task_type == "AUDIO":
-        if not (
-            "audio_reader" in tool_names
-            or "transcribe_audio" in tool_names
-        ):
-            return VerificationResult(
-                status=VerificationStatus.UNSUPPORTED,
-                reason=(
-                    "The task requires audio evidence, "
-                    "but no successful audio evidence "
-                    "is available."
-                ),
-            )
-
-    if task_type == "VIDEO":
-        if not (
-            "video_reader" in tool_names
-            or "analyze_video" in tool_names
-            or "youtube_transcript" in tool_names
-        ):
-            return VerificationResult(
-                status=VerificationStatus.UNSUPPORTED,
-                reason=(
-                    "The task requires video evidence, "
-                    "but no successful video-related "
-                    "evidence is available."
-                ),
-            )
-
     return None
 
 
 class VerifierAgent:
-    def __init__(
-        self,
-        *,
-        client: LLMClient,
-        model: LLMModel,
-    ) -> None:
+    """Two-stage verifier: deterministic proof first, semantic verification second."""
+
+    def __init__(self, client: LLMClient, model: str) -> None:
         self.client = client
         self.model = model
 
-    async def verify(
-        self,
-        data: VerificationInput,
-    ) -> VerificationResult:
-        candidate = str(
-            data.candidate_answer or ""
-        ).strip()
-
+    async def verify(self, data: VerificationInput) -> VerificationResult:
+        candidate = data.candidate_answer.strip()
         if not candidate:
-            return VerificationResult(
-                status=VerificationStatus.INVALID,
-                reason="Candidate answer is missing or empty.",
-            )
+            return VerificationResult(status=VerificationStatus.INVALID, reason="The candidate answer is empty.")
 
-        evidence = _iter_successful_evidence(
-            data.raw_data
-        )
-
+        evidence = _filter_current_evidence(data.raw_data)
         if not evidence:
             return VerificationResult(
                 status=VerificationStatus.INSUFFICIENT_EVIDENCE,
-                reason=(
-                    "No successful evidence is available "
-                    "to verify the candidate answer."
-                ),
+                reason="No successful current independent evidence is available for verification.",
             )
-
-        unsupported = _check_source_support(data)
-
-        if unsupported is not None:
-            return unsupported
-
-        (
-            deterministic_status,
-            deterministic_reason,
-        ) = deterministic_verification(
-            data.candidate_answer,
-            data.raw_data,
-        )
-
-        if deterministic_status in {
-            VerificationStatus.VERIFIED,
-            VerificationStatus.INVALID,
-        }:
-            return VerificationResult(
-                status=deterministic_status,
-                reason=deterministic_reason,
-            )
-
-        messages = self._build_messages(data)
-
-        result = await self.client.generate(
-            messages=messages,
-            model=self.model,
-            output_schema=VerificationResult,
-        )
-
-        if not isinstance(result, VerificationResult):
-            raise TypeError(
-                "LLMClient.generate() returned an invalid "
-                "VerificationResult."
-            )
-
-        return self._validate_llm_result(result)
-
-    @staticmethod
-    def _validate_llm_result(
-        result: VerificationResult,
-    ) -> VerificationResult:
-        if result.status == VerificationStatus.VERIFIED:
-            return VerificationResult(
-                status=VerificationStatus.VERIFIED,
-                reason=(
-                    "Candidate was semantically verified "
-                    "against the available evidence: "
-                    f"{result.reason}"
-                ),
-            )
-
-        if result.status == VerificationStatus.INVALID:
-            return VerificationResult(
-                status=VerificationStatus.INVALID,
-                reason=(
-                    "The evidence contradicts or fails to "
-                    "support the candidate: "
-                    f"{result.reason}"
-                ),
-            )
-
-        if result.status == VerificationStatus.CONFLICTING_EVIDENCE:
-            return VerificationResult(
-                status=VerificationStatus.CONFLICTING_EVIDENCE,
-                reason=(
-                    "The available evidence contains "
-                    "materially conflicting information: "
-                    f"{result.reason}"
-                ),
-            )
-
-        if result.status == VerificationStatus.UNSUPPORTED:
+        if not _check_source_support(data, evidence):
             return VerificationResult(
                 status=VerificationStatus.UNSUPPORTED,
-                reason=(
-                    "The available evidence does not "
-                    "represent the source or modality "
-                    "required for verification: "
-                    f"{result.reason}"
-                ),
+                reason="The available evidence is incompatible with the requested task modality.",
             )
 
-        return VerificationResult(
-            status=VerificationStatus.INSUFFICIENT_EVIDENCE,
-            reason=(
-                "The available evidence is insufficient "
-                "to verify the candidate: "
-                f"{result.reason}"
-            ),
-        )
+        deterministic = deterministic_verification(candidate, evidence)
+        if deterministic.status in {VerificationStatus.VERIFIED, VerificationStatus.INVALID}:
+            return deterministic
+        return await self._semantic_verify(data, evidence, deterministic)
 
-    def _build_messages(
+    async def _semantic_verify(
         self,
         data: VerificationInput,
-    ) -> list[dict[str, str]]:
-        return [
-            {
-                "role": "system",
-                "content": self._system_prompt(),
-            },
-            {
-                "role": "user",
-                "content": self._build_prompt(data),
-            },
-        ]
+        evidence: list[Any],
+        deterministic_result: VerificationResult,
+    ) -> VerificationResult:
+        result = await self.client.generate(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": self._system_prompt()},
+                {"role": "user", "content": self._build_prompt(data, evidence, deterministic_result)},
+            ],
+            output_schema=VerificationResult,
+        )
+        return self._validate_llm_result(result, deterministic_result, evidence)
+
+    def _validate_llm_result(
+        self,
+        result: Any,
+        deterministic_result: VerificationResult,
+        evidence: list[Any],
+    ) -> VerificationResult:
+        if not evidence:
+            return VerificationResult(status=VerificationStatus.INSUFFICIENT_EVIDENCE, reason="No usable evidence.")
+        if not isinstance(result, VerificationResult) or result.status is None:
+            return VerificationResult(
+                status=VerificationStatus.INSUFFICIENT_EVIDENCE,
+                reason="The semantic verifier returned an invalid or incomplete verification result.",
+            )
+
+        reason = result.reason.strip()
+        if result.status == VerificationStatus.VERIFIED and not reason:
+            return VerificationResult(
+                status=VerificationStatus.INSUFFICIENT_EVIDENCE,
+                reason="The verifier returned VERIFIED without an evidence-grounded explanation.",
+            )
+
+        if deterministic_result.status == VerificationStatus.CONFLICTING_EVIDENCE:
+            if result.status == VerificationStatus.VERIFIED and not self._reason_resolves_conflict(reason):
+                return VerificationResult(
+                    status=VerificationStatus.CONFLICTING_EVIDENCE,
+                    reason="The verifier did not explain how the detected evidence conflict was resolved.",
+                )
+
+        if result.status in {
+            VerificationStatus.INSUFFICIENT_EVIDENCE,
+            VerificationStatus.CONFLICTING_EVIDENCE,
+            VerificationStatus.UNSUPPORTED,
+        }:
+            result.verified = False
+        return result
+
+    @staticmethod
+    def _reason_resolves_conflict(reason: str) -> bool:
+        markers = (
+            "intermediate", "partial", "final", "different question", "different entity",
+            "unrelated", "earlier state", "stale", "different unit", "more direct",
+            "directly answers", "multi-step", "calculation", "artifact",
+        )
+        text = reason.lower()
+        return any(marker in text for marker in markers)
 
     @staticmethod
     def _system_prompt() -> str:
         return """
-You are a strict factual answer verification agent.
+You are a strict factual verification agent for a GAIA-style system.
 
-Your ONLY responsibility is to determine whether the candidate answer is supported by the provided evidence.
+Your ONLY source of truth is CURRENT EVIDENCE supplied in the prompt.
+Never use outside knowledge. Never invent facts, calculations, citations, or evidence.
+LLM output is not evidence. Failed steps are not evidence. Explicitly irrelevant
+sources are not evidence. Evidence from an obsolete run/replan/attempt is not evidence.
 
-You are NOT an answer generator.
-You are NOT allowed to solve the task independently.
-You are NOT allowed to use outside knowledge.
+A candidate is VERIFIED only when the evidence itself establishes the answer to the
+EXACT QUESTION. A matching number or word is never sufficient by itself.
 
-You must reason only from the supplied QUESTION, CANDIDATE ANSWER, TASK TYPE, and EVIDENCE.
+You MUST handle these adversarial cases:
+- multiple numbers in one artifact
+- intermediate/partial/subtotal vs final result
+- multi-step calculations with missing steps
+- conflicting tools or sources
+- weak vs strong evidence
+- hallucinated candidate answers
+- verifier knowledge outside the evidence
+- unrelated web evidence
+- multiple artifacts from unrelated tasks
+- failed-step evidence
+- stale evidence after a replan
+- correct answer with insufficient proof
+- wrong answer whose number happens to occur in evidence
+- structured artifact fields such as answer/final_answer/result/output
 
-CRITICAL RULES:
+For conflicts, determine whether values belong to different entities, questions,
+units, dates, attempts, intermediate steps, or genuinely conflict. If genuinely
+unresolved, return CONFLICTING_EVIDENCE.
 
-1. Evaluate the evidence against the EXACT question.
-2. The evidence must actually support the candidate answer.
-3. The evidence must actually answer or support the exact question.
-4. Do not accept unrelated web-search evidence.
-5. The specific source requested by the question must be represented by the evidence.
-6. The mere presence of the candidate text, number, name, or value inside evidence is NOT sufficient.
-7. Never use outside knowledge.
-8. Never invent missing evidence.
-9. Never generate a replacement answer.
-10. If the evidence explicitly contradicts the candidate, return verified=false.
-11. If relevant evidence contains material contradictions between sources, return CONFLICTING_EVIDENCE.
-12. If evidence is relevant but does not establish the candidate with sufficient confidence, return INSUFFICIENT_EVIDENCE.
-13. If the required source or modality is not represented by the evidence, return UNSUPPORTED.
-14. Return VERIFIED only when the evidence provides a direct and reasonable factual basis for the candidate.
-15. For web evidence, verify semantic relevance to the exact question.
-16. Matching words, numbers, titles, or names alone are not sufficient.
-17. For files, images, audio, and video, verify that the evidence actually corresponds to the requested source.
-18. Do not infer that a source supports the candidate merely because the candidate appears somewhere in the source.
-19. Pay attention to negation.
-20. Pay attention to temporal context.
-21. Pay attention to relationships between values and entities.
-22. When multiple numbers occur in evidence, do not assume that the candidate is correct merely because its number appears in the evidence.
-23. When uncertain, prefer INSUFFICIENT_EVIDENCE.
-24. The evidence is the only source of truth available to you.
+If the candidate is plausible but the evidence does not establish it, return
+INSUFFICIENT_EVIDENCE. Do not reward correctness by coincidence.
 
-Return ONLY the structured VerificationResult.
+Return VERIFIED only when the supplied evidence establishes the candidate.
+Return INVALID when current evidence establishes a different answer or directly
+contradicts the candidate.
+Return UNSUPPORTED when the evidence modality cannot support the requested task.
+Return a concise reason grounded only in the supplied evidence.
 """.strip()
-
-    @staticmethod
-    def _format_evidence(
-        evidence: list[EvidenceItem],
-    ) -> str:
-        if not evidence:
-            return "(No successful evidence was provided.)"
-
-        chunks: list[str] = []
-
-        for index, item in enumerate(evidence, start=1):
-            metadata: list[str] = [
-                f"source_tool={item.tool_name}"
-            ]
-
-            if item.source_type:
-                metadata.append(
-                    f"source_type={item.source_type}"
-                )
-
-            if item.artifact_id:
-                metadata.append(
-                    f"artifact_id={item.artifact_id}"
-                )
-
-            metadata_text = ", ".join(metadata)
-
-            chunks.append(
-                f"Evidence {index} ({metadata_text}):\n"
-                f"{item.result}"
-            )
-
-        return "\n\n".join(chunks)
 
     def _build_prompt(
         self,
         data: VerificationInput,
+        evidence: list[Any],
+        deterministic_result: VerificationResult,
     ) -> str:
-        evidence = _iter_successful_evidence(
-            data.raw_data
-        )
-
-        evidence_text = self._format_evidence(
-            evidence
-        )
-
         return f"""
-Verify the candidate answer using ONLY the provided evidence.
-
 QUESTION:
 {data.question}
-
-TASK TYPE:
-{data.task_type or "unknown"}
 
 CANDIDATE ANSWER:
 {data.candidate_answer}
 
-EVIDENCE:
-{evidence_text}
+TASK TYPE:
+{data.task_type}
 
-Your decision must be based on whether the evidence actually supports the candidate answer to the exact question.
+DETERMINISTIC FINDING:
+status={deterministic_result.status.value if deterministic_result.status else 'unknown'}
+reason={deterministic_result.reason}
 
-Choose exactly ONE status:
+CURRENT EVIDENCE:
+{self._format_evidence(evidence)}
 
-VERIFIED
-The evidence directly and sufficiently supports the candidate.
+Before returning VERIFIED, check:
+1. Is every piece of support relevant to this exact question?
+2. Is the candidate final rather than intermediate?
+3. Are there multiple numbers/entities/artifacts that could be confused?
+4. Do all required steps of a calculation exist in evidence?
+5. Are any sources weak, unrelated, failed, stale, or from an older replan?
+6. Does the candidate merely appear somewhere without being the requested answer?
+7. Can the conclusion be justified without any outside knowledge?
 
-INVALID
-The evidence contradicts the candidate.
-
-INSUFFICIENT_EVIDENCE
-The evidence is relevant but insufficient to establish whether the candidate is correct.
-
-CONFLICTING_EVIDENCE
-Two or more relevant evidence sources materially contradict each other.
-
-UNSUPPORTED
-The required source or modality is not represented by the available evidence.
-
-IMPORTANT:
-
-- Do not use outside knowledge.
-- Do not guess.
-- Do not solve the question independently.
-- Do not treat a matching number or string as sufficient.
-- Check relationships, context, entity, time, and negation.
-- Reject unrelated web-search evidence.
-- Verify that the evidence corresponds to the specific source requested.
-- If uncertain, return INSUFFICIENT_EVIDENCE.
-
-Return a concise reason.
+If any required support is missing, return INSUFFICIENT_EVIDENCE.
 """.strip()
 
     @staticmethod
-    def _format_raw_item(
-        item: Any,
-    ) -> str:
-        if item is None:
-            return "None"
-
-        if isinstance(item, str):
-            return item
-
+    def _format_raw_item(item: Any) -> str:
         if isinstance(item, BaseModel):
-            return item.model_dump_json(indent=2)
-
-        if isinstance(item, (dict, list, tuple, set)):
             try:
-                return json.dumps(
-                    item,
-                    default=str,
-                    indent=2,
-                )
+                return json.dumps(item.model_dump(), ensure_ascii=False, default=str)
             except Exception:
                 return str(item)
-
+        if isinstance(item, dict):
+            try:
+                return json.dumps(item, ensure_ascii=False, default=str)
+            except Exception:
+                return str(item)
         return str(item)
+
+    def _format_evidence(self, evidence: list[Any]) -> str:
+        chunks: list[str] = []
+        for index, item in enumerate(evidence, start=1):
+            metadata = [
+                f"tool={_get_tool_name(item) or 'unknown'}",
+                f"strength={self._evidence_strength(item)}",
+            ]
+            for field in (
+                "artifact_id", "step_id", "execution_id", "attempt_id", "run_id",
+                "step_status",
+            ):
+                value = _get_str(item, field)
+                if value:
+                    metadata.append(f"{field}={value}")
+            version = _get_plan_version(item)
+            if version is not None:
+                metadata.append(f"plan_version={version}")
+            relevant = _get_relevant(item)
+            metadata.append(f"relevant={relevant if relevant is not None else 'unknown'}")
+            chunks.append(
+                f"Evidence {index} ({', '.join(metadata)}):\n"
+                f"{self._format_raw_item(_get_result(item))}"
+            )
+        return "\n\n".join(chunks)
+
+    @staticmethod
+    def _evidence_strength(item: Any) -> str:
+        tool = _get_tool_name(item)
+        if tool in _STRONG_TOOL_NAMES:
+            return "strong"
+        if tool in _SEMANTIC_TOOL_NAMES:
+            return "semantic"
+        return "weak"

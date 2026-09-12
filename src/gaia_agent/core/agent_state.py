@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
+from gaia_agent.context.attachments import Attachment
 from gaia_agent.core.evidence import ArtifactInfo, ToolResultRecord
 from gaia_agent.planner.plan_schema import PlanStep, StepType
 from gaia_agent.reliability.errors import (
@@ -11,7 +12,6 @@ from gaia_agent.reliability.errors import (
     ErrorCategory,
     ErrorSeverity,
 )
-from gaia_agent.context.attachments import Attachment
 
 
 class AgentPhase(str, Enum):
@@ -49,37 +49,60 @@ class StateTransition:
 class AgentState:
     user_request: str = ""
 
-    phase: AgentPhase = AgentPhase.IDLE
+    attachments: list[Attachment] = field(
+        default_factory=list
+    )
 
     metadata: dict[str, Any] = field(
         default_factory=dict
     )
+
+    phase: AgentPhase = AgentPhase.IDLE
+
+    termination_reason: Any = None
+
+    human_aborted: bool = False
+    explicit_stop: bool = False
+    timed_out: bool = False
+    fatal_error: bool = False
 
     plan: list[PlanStep] = field(
         default_factory=list
     )
 
     current_step: int | None = None
+
     completed_steps: list[int] = field(
         default_factory=list
     )
-    attachments: list[Attachment] = field(
-    default_factory=list)
 
     current_action: str | None = None
+
     step_type: StepType | None = None
 
     tool_name: str | None = None
+
     tool_arguments: dict[str, Any] = field(
         default_factory=dict
     )
+
     tool_result: Any = None
+
     tool_error: str | None = None
 
     execution_success: bool = False
     step_succeeded: bool = False
     blocked: bool = False
     waiting_for_approval: bool = False
+
+    final_answer: str | None = None
+
+    final_answer_ready: bool = False
+    final_answer_verified: bool = False
+
+    task_completed: bool = False
+
+    verification_attempts: int = 0
 
     iteration: int = 0
 
@@ -88,33 +111,24 @@ class AgentState:
     replan_count: int = 0
 
     loop_salvage_attempted: bool = False
+
     same_failure_count: int = 0
     same_plan_count: int = 0
+
     last_failure_key: str | None = None
-
-    final_answer: str | None = None
-    final_answer_ready: bool = False
-    final_answer_verified: bool = False
-    verification_attempts: int = 0
-
-    task_completed: bool = False
-
-    fatal_error: bool = False
-    human_aborted: bool = False
-    explicit_stop: bool = False
-    timed_out: bool = False
-
-    termination_reason: Any = None
 
     evidence: list[ToolResultRecord] = field(
         default_factory=list
     )
+
     artifacts: list[ArtifactInfo] = field(
         default_factory=list
     )
+
     execution_results: list[Any] = field(
         default_factory=list
     )
+
     messages: list[Any] = field(
         default_factory=list
     )
@@ -123,55 +137,50 @@ class AgentState:
         default_factory=list
     )
 
-    _ALLOWED_TRANSITIONS: dict[
-        AgentPhase,
-        frozenset[AgentPhase],
-    ] = field(
-        default_factory=lambda: {
-            AgentPhase.IDLE: frozenset(
-                {
-                    AgentPhase.PLANNING,
-                    AgentPhase.TERMINATED,
-                }
-            ),
-            AgentPhase.PLANNING: frozenset(
-                {
-                    AgentPhase.EXECUTING,
-                    AgentPhase.FAILED,
-                    AgentPhase.TERMINATED,
-                }
-            ),
-            AgentPhase.EXECUTING: frozenset(
-                {
-                    AgentPhase.VERIFYING,
-                    AgentPhase.FAILED,
-                    AgentPhase.TERMINATED,
-                }
-            ),
-            AgentPhase.VERIFYING: frozenset(
-                {
-                    AgentPhase.COMPLETED,
-                    AgentPhase.PLANNING,
-                    AgentPhase.FAILED,
-                    AgentPhase.TERMINATED,
-                }
-            ),
-            AgentPhase.COMPLETED: frozenset(
-                {
-                    AgentPhase.TERMINATED,
-                }
-            ),
-            AgentPhase.FAILED: frozenset(
-                {
-                    AgentPhase.PLANNING,
-                    AgentPhase.TERMINATED,
-                }
-            ),
-            AgentPhase.TERMINATED: frozenset(),
-        },
-        init=False,
-        repr=False,
-    )
+    _ALLOWED_TRANSITIONS: ClassVar[
+        dict[AgentPhase, frozenset[AgentPhase]]
+    ] = {
+        AgentPhase.IDLE: frozenset(
+            {
+                AgentPhase.PLANNING,
+                AgentPhase.TERMINATED,
+            }
+        ),
+        AgentPhase.PLANNING: frozenset(
+            {
+                AgentPhase.EXECUTING,
+                AgentPhase.FAILED,
+                AgentPhase.TERMINATED,
+            }
+        ),
+        AgentPhase.EXECUTING: frozenset(
+            {
+                AgentPhase.VERIFYING,
+                AgentPhase.FAILED,
+                AgentPhase.TERMINATED,
+            }
+        ),
+        AgentPhase.VERIFYING: frozenset(
+            {
+                AgentPhase.COMPLETED,
+                AgentPhase.PLANNING,
+                AgentPhase.FAILED,
+                AgentPhase.TERMINATED,
+            }
+        ),
+        AgentPhase.COMPLETED: frozenset(
+            {
+                AgentPhase.TERMINATED,
+            }
+        ),
+        AgentPhase.FAILED: frozenset(
+            {
+                AgentPhase.PLANNING,
+                AgentPhase.TERMINATED,
+            }
+        ),
+        AgentPhase.TERMINATED: frozenset(),
+    }
 
     def transition(
         self,
@@ -183,8 +192,8 @@ class AgentState:
             raise AgentError(
                 error_type="InvalidPhase",
                 message=(
-                    f"Invalid phase type: "
-                    f"{type(new_phase).__name__}"
+                    "Invalid phase type: "
+                    f"{type(new_phase).name}"
                 ),
                 category=ErrorCategory.VALIDATION,
                 severity=ErrorSeverity.HIGH,
@@ -202,7 +211,7 @@ class AgentState:
             raise AgentError(
                 error_type="InvalidTransitionReason",
                 message=(
-                    f"Invalid transition reason: "
+                    "Invalid transition reason: "
                     f"{reason!r}"
                 ),
                 category=ErrorCategory.VALIDATION,
@@ -229,7 +238,7 @@ class AgentState:
             raise AgentError(
                 error_type="InvalidStateTransition",
                 message=(
-                    f"Invalid state transition: "
+                    "Invalid state transition: "
                     f"{current_phase.value} -> "
                     f"{new_phase.value}"
                 ),
@@ -280,6 +289,9 @@ class AgentState:
         )
 
     def complete(self) -> StateTransition:
+        self.final_answer_verified = True
+        self.task_completed = True
+
         return self.transition(
             AgentPhase.COMPLETED,
             reason=TransitionReason.VERIFICATION_PASSED,
@@ -292,27 +304,39 @@ class AgentState:
             TransitionReason.EXECUTION_FAILED
         ),
     ) -> StateTransition:
+        self.fatal_error = True
+
         return self.transition(
             AgentPhase.FAILED,
             reason=reason,
         )
 
     def recover(self) -> StateTransition:
+        self.recovery_attempted = True
+
         return self.transition(
             AgentPhase.PLANNING,
             reason=TransitionReason.RECOVERY,
         )
 
     def retry(self) -> StateTransition:
+        self.retry_count += 1
+
         return self.transition(
             AgentPhase.PLANNING,
             reason=TransitionReason.RETRY,
         )
 
-    def terminate(self) -> StateTransition:
+    def terminate(
+        self,
+        *,
+        reason: TransitionReason = TransitionReason.TERMINATION,
+    ) -> StateTransition:
+        self.termination_reason = reason
+
         return self.transition(
             AgentPhase.TERMINATED,
-            reason=TransitionReason.TERMINATION,
+            reason=reason,
         )
 
     @property
