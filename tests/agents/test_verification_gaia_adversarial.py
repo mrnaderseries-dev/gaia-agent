@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gaia_agent.evaluation.verification import (
+from gaia_agent.agents.verifier import (
     VerificationInput,
     VerificationResult,
     VerificationStatus,
@@ -12,7 +12,6 @@ from gaia_agent.evaluation.verification import (
     deterministic_verification,
     evidence_supports_candidate,
 )
-
 
 # ============================================================================
 # Helpers
@@ -68,7 +67,7 @@ def assert_status(
 
 
 def make_agent() -> VerifierAgent:
-    return object.new(VerifierAgent)
+    return object.__new__(VerifierAgent)
 
 
 # ============================================================================
@@ -1323,4 +1322,3 @@ def test_explicitly_wrong_final_answer_is_invalid(
     )
 
     assert result.status == VerificationStatus.INVALID
-    
