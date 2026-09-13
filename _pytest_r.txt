@@ -1,0 +1,443 @@
+﻿FFFF...........FF.....FF                                                 [100%]
+================================== FAILURES ===================================
+_____________________ test_1_success_no_retry_no_recovery _____________________
+
+    @pytest.mark.asyncio
+    async def test_1_success_no_retry_no_recovery():
+>       engine = make_engine()
+                 ^^^^^^^^^^^^^
+
+tests\reliability\test_engine.py:41: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+max_attempts = 3, max_recoveries = 2, max_total_executions = 10
+
+    def make_engine(
+        *,
+        max_attempts=3,
+        max_recoveries=2,
+        max_total_executions=10,
+    ):
+        return ReliabilityEngine(
+            error_handler=ErrorHandler(),
+            failure_classifier=FailureClassifier(),
+            retry_policy=RetryPolicy(
+                max_attempts=max_attempts,
+                base_delay=0,
+                max_delay=0,
+            ),
+>           recovery_policy=RecoveryPolicy(
+                allow_replan=True,
+            ),
+            retry=Retry(),
+            recovery=Recovery(),
+            max_recoveries=max_recoveries,
+            max_total_executions=max_total_executions,
+        )
+E       TypeError: RecoveryPolicy.__init__() got an unexpected keyword argument 'allow_replan'
+
+tests\reliability\test_engine.py:29: TypeError
+____________________ test_2_transient_failure_then_success ____________________
+
+    @pytest.mark.asyncio
+    async def test_2_transient_failure_then_success():
+>       engine = make_engine(
+            max_attempts=3,
+        )
+
+tests\reliability\test_engine.py:65: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+max_attempts = 3, max_recoveries = 2, max_total_executions = 10
+
+    def make_engine(
+        *,
+        max_attempts=3,
+        max_recoveries=2,
+        max_total_executions=10,
+    ):
+        return ReliabilityEngine(
+            error_handler=ErrorHandler(),
+            failure_classifier=FailureClassifier(),
+            retry_policy=RetryPolicy(
+                max_attempts=max_attempts,
+                base_delay=0,
+                max_delay=0,
+            ),
+>           recovery_policy=RecoveryPolicy(
+                allow_replan=True,
+            ),
+            retry=Retry(),
+            recovery=Recovery(),
+            max_recoveries=max_recoveries,
+            max_total_executions=max_total_executions,
+        )
+E       TypeError: RecoveryPolicy.__init__() got an unexpected keyword argument 'allow_replan'
+
+tests\reliability\test_engine.py:29: TypeError
+__________ test_3_recoverable_failure_replans_and_executes_new_plan ___________
+
+    @pytest.mark.asyncio
+    async def test_3_recoverable_failure_replans_and_executes_new_plan():
+>       engine = make_engine(
+            max_attempts=1,
+            max_recoveries=1,
+            max_total_executions=3,
+        )
+
+tests\reliability\test_engine.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+max_attempts = 1, max_recoveries = 1, max_total_executions = 3
+
+    def make_engine(
+        *,
+        max_attempts=3,
+        max_recoveries=2,
+        max_total_executions=10,
+    ):
+        return ReliabilityEngine(
+            error_handler=ErrorHandler(),
+            failure_classifier=FailureClassifier(),
+            retry_policy=RetryPolicy(
+                max_attempts=max_attempts,
+                base_delay=0,
+                max_delay=0,
+            ),
+>           recovery_policy=RecoveryPolicy(
+                allow_replan=True,
+            ),
+            retry=Retry(),
+            recovery=Recovery(),
+            max_recoveries=max_recoveries,
+            max_total_executions=max_total_executions,
+        )
+E       TypeError: RecoveryPolicy.__init__() got an unexpected keyword argument 'allow_replan'
+
+tests\reliability\test_engine.py:29: TypeError
+_______________________ test_4_same_replan_is_rejected ________________________
+
+    @pytest.mark.asyncio
+    async def test_4_same_replan_is_rejected():
+>       engine = make_engine(
+            max_attempts=1,
+            max_recoveries=2,
+            max_total_executions=5,
+        )
+
+tests\reliability\test_engine.py:146: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+max_attempts = 1, max_recoveries = 2, max_total_executions = 5
+
+    def make_engine(
+        *,
+        max_attempts=3,
+        max_recoveries=2,
+        max_total_executions=10,
+    ):
+        return ReliabilityEngine(
+            error_handler=ErrorHandler(),
+            failure_classifier=FailureClassifier(),
+            retry_policy=RetryPolicy(
+                max_attempts=max_attempts,
+                base_delay=0,
+                max_delay=0,
+            ),
+>           recovery_policy=RecoveryPolicy(
+                allow_replan=True,
+            ),
+            retry=Retry(),
+            recovery=Recovery(),
+            max_recoveries=max_recoveries,
+            max_total_executions=max_total_executions,
+        )
+E       TypeError: RecoveryPolicy.__init__() got an unexpected keyword argument 'allow_replan'
+
+tests\reliability\test_engine.py:29: TypeError
+_________ test_recovery_operation_failure_is_not_reported_as_success __________
+
+received_error = AgentError(error_type='TestError', message='test failure', category=<ErrorCategory.UNKNOWN: 'unknown'>, severity=<Erro...eration', attempt=1, error_code=None, details={}, original_exception=RuntimeError('test failure'), correlation_id=None)
+
+    async def operation(received_error: AgentError):
+>       raise RuntimeError("recovery operation failed")
+E       RuntimeError: recovery operation failed
+
+tests\reliability\test_p0_3_reliability_flow.py:437: RuntimeError
+
+During handling of the above exception, another exception occurred:
+
+recovery = <gaia_agent.reliability.recovery.Recovery object at 0x000001711453FA10>
+
+    @pytest.mark.asyncio
+    async def test_recovery_operation_failure_is_not_reported_as_success(
+        recovery: Recovery,
+    ):
+        """
+        Recovery itself can fail.
+        """
+    
+        error = make_error(
+            recoverable=True,
+        )
+    
+        async def operation(received_error: AgentError):
+            raise RuntimeError("recovery operation failed")
+    
+>       result = await recovery.execute(
+            error=error,
+            operation=operation,
+        )
+
+tests\reliability\test_p0_3_reliability_flow.py:439: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <gaia_agent.reliability.recovery.Recovery object at 0x000001711453FA10>
+error = AgentError(error_type='TestError', message='test failure', category=<ErrorCategory.UNKNOWN: 'unknown'>, severity=<Erro...eration', attempt=1, error_code=None, details={}, original_exception=RuntimeError('test failure'), correlation_id=None)
+operation = <function test_recovery_operation_failure_is_not_reported_as_success.<locals>.operation at 0x00000171145E8220>
+change_detector = None
+
+    async def execute(
+        self,
+        *,
+        error: AgentError,
+        operation: Callable[
+            [AgentError],
+            Awaitable[Any],
+        ],
+        change_detector: Callable[
+            [Any],
+            bool,
+        ] | None = None,
+    ) -> RecoveryResult:
+    
+        try:
+            result = await operation(error)
+    
+        except Exception as exception:
+>           recovery_error = self.error_handler.handle(
+                             ^^^^^^^^^^^^^^^^^^
+                exception,
+                source="recovery",
+                operation="recovery",
+                attempt=1,
+            )
+E           AttributeError: 'Recovery' object has no attribute 'error_handler'
+
+src\gaia_agent\reliability\recovery.py:47: AttributeError
+________ test_change_detector_failure_does_not_claim_recovery_success _________
+
+value = {'strategy': 'new_strategy'}
+
+    def broken_change_detector(value):
+>       raise RuntimeError("change detector crashed")
+E       RuntimeError: change detector crashed
+
+tests\reliability\test_p0_3_reliability_flow.py:470: RuntimeError
+
+During handling of the above exception, another exception occurred:
+
+recovery = <gaia_agent.reliability.recovery.Recovery object at 0x000001711453E660>
+
+    @pytest.mark.asyncio
+    async def test_change_detector_failure_does_not_claim_recovery_success(
+        recovery: Recovery,
+    ):
+        """
+        If the recovery operation succeeds but validation of the
+        change fails, Recovery must fail closed.
+        """
+    
+        error = make_error(
+            recoverable=True,
+        )
+    
+        async def operation(received_error: AgentError):
+            return {
+                "strategy": "new_strategy",
+            }
+    
+        def broken_change_detector(value):
+            raise RuntimeError("change detector crashed")
+    
+>       result = await recovery.execute(
+            error=error,
+            operation=operation,
+            change_detector=broken_change_detector,
+        )
+
+tests\reliability\test_p0_3_reliability_flow.py:472: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <gaia_agent.reliability.recovery.Recovery object at 0x000001711453E660>
+error = AgentError(error_type='TestError', message='test failure', category=<ErrorCategory.UNKNOWN: 'unknown'>, severity=<Erro...eration', attempt=1, error_code=None, details={}, original_exception=RuntimeError('test failure'), correlation_id=None)
+operation = <function test_change_detector_failure_does_not_claim_recovery_success.<locals>.operation at 0x0000017114543100>
+change_detector = <function test_change_detector_failure_does_not_claim_recovery_success.<locals>.broken_change_detector at 0x00000171145E8A40>
+
+    async def execute(
+        self,
+        *,
+        error: AgentError,
+        operation: Callable[
+            [AgentError],
+            Awaitable[Any],
+        ],
+        change_detector: Callable[
+            [Any],
+            bool,
+        ] | None = None,
+    ) -> RecoveryResult:
+    
+        try:
+            result = await operation(error)
+    
+        except Exception as exception:
+            recovery_error = self.error_handler.handle(
+                exception,
+                source="recovery",
+                operation="recovery",
+                attempt=1,
+            )
+    
+            return RecoveryResult(
+                recovered=False,
+                result=None,
+                changed=False,
+                reason="Recovery operation failed.",
+                error=recovery_error,
+            )
+    
+        # No change detector means that successful
+        # completion of the recovery operation itself
+        # is considered sufficient.
+        if change_detector is None:
+            return RecoveryResult(
+                recovered=True,
+                result=result,
+                changed=True,
+                reason=(
+                    "Recovery produced a meaningful change."
+                ),
+                error=None,
+            )
+    
+        try:
+            changed = bool(
+                change_detector(result)
+            )
+    
+        except Exception as exception:
+>           validation_error = self.error_handler.handle(
+                               ^^^^^^^^^^^^^^^^^^
+                exception,
+                source="recovery",
+                operation="change_detection",
+                attempt=1,
+            )
+E           AttributeError: 'Recovery' object has no attribute 'error_handler'
+
+src\gaia_agent\reliability\recovery.py:82: AttributeError
+_____________ test_verified_answer_completes_and_emits_completed ______________
+
+    @pytest.mark.asyncio
+    async def test_verified_answer_completes_and_emits_completed():
+        orchestrator = Mock()
+    
+        state = make_state(
+            verified=True,
+            verification_attempts=1,
+        )
+    
+        loop = AgentLoop(
+            orchestrator=orchestrator,
+            termination_policy=TerminationPolicy(
+                max_iterations=3,
+                max_verification_attempts=2,
+            ),
+        )
+    
+>       result = await loop.run(state)
+                 ^^^^^^^^^^^^^^^^^^^^^
+
+tests\reliability\core\test_agent_loop_verification_gate.py:49: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\gaia_agent\core\agent_loop.py:118: in run
+    return await self.run_agent(state)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\gaia_agent\core\agent_loop.py:73: in run_agent
+    self._validate_state(state)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+state = namespace(user_request='test', final_answer_ready=True, final_answer_verified=True, verification_attempts=1, iteration=0, fatal_error=False, human_aborted=False, explicit_stop=False, timed_out=False, task_completed=False)
+
+    @staticmethod
+    def _validate_state(
+        state: AgentState,
+    ) -> None:
+        if not isinstance(
+            state,
+            AgentState,
+        ):
+>           raise TypeError(
+                "AgentLoop.run() expects AgentState."
+            )
+E           TypeError: AgentLoop.run() expects AgentState.
+
+src\gaia_agent\core\agent_loop.py:326: TypeError
+_______________ test_unverified_answer_budget_does_not_complete _______________
+
+    @pytest.mark.asyncio
+    async def test_unverified_answer_budget_does_not_complete():
+        orchestrator = Mock()
+    
+        state = make_state(
+            verified=False,
+            verification_attempts=2,
+        )
+    
+        loop = AgentLoop(
+            orchestrator=orchestrator,
+            termination_policy=TerminationPolicy(
+                max_iterations=3,
+                max_verification_attempts=2,
+            ),
+        )
+    
+>       result = await loop.run(state)
+                 ^^^^^^^^^^^^^^^^^^^^^
+
+tests\reliability\core\test_agent_loop_verification_gate.py:74: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src\gaia_agent\core\agent_loop.py:118: in run
+    return await self.run_agent(state)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src\gaia_agent\core\agent_loop.py:73: in run_agent
+    self._validate_state(state)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+state = namespace(user_request='test', final_answer_ready=True, final_answer_verified=False, verification_attempts=2, iteration=0, fatal_error=False, human_aborted=False, explicit_stop=False, timed_out=False, task_completed=False)
+
+    @staticmethod
+    def _validate_state(
+        state: AgentState,
+    ) -> None:
+        if not isinstance(
+            state,
+            AgentState,
+        ):
+>           raise TypeError(
+                "AgentLoop.run() expects AgentState."
+            )
+E           TypeError: AgentLoop.run() expects AgentState.
+
+src\gaia_agent\core\agent_loop.py:326: TypeError
+=========================== short test summary info ===========================
+FAILED tests/reliability/test_engine.py::test_1_success_no_retry_no_recovery
+FAILED tests/reliability/test_engine.py::test_2_transient_failure_then_success
+FAILED tests/reliability/test_engine.py::test_3_recoverable_failure_replans_and_executes_new_plan
+FAILED tests/reliability/test_engine.py::test_4_same_replan_is_rejected - Typ...
+FAILED tests/reliability/test_p0_3_reliability_flow.py::test_recovery_operation_failure_is_not_reported_as_success
+FAILED tests/reliability/test_p0_3_reliability_flow.py::test_change_detector_failure_does_not_claim_recovery_success
+FAILED tests/reliability/core/test_agent_loop_verification_gate.py::test_verified_answer_completes_and_emits_completed
+FAILED tests/reliability/core/test_agent_loop_verification_gate.py::test_unverified_answer_budget_does_not_complete
+8 failed, 16 passed in 2.70s

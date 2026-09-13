@@ -1,0 +1,28 @@
+﻿F                                                                        [100%]
+================================== FAILURES ===================================
+__________________________ test_same_execution_logic __________________________
+
+    def test_same_execution_logic():
+        orchestrator = make_test_orchestrator()
+    
+        first = make_step(
+            "web_search",
+            "Malko",
+        )
+    
+        second = make_step(
+            "web_search",
+            "Malko",
+        )
+    
+>       assert orchestrator._same_execution(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            first,
+            second,
+        ) is True
+E       AttributeError: 'Orchestrator' object has no attribute '_same_execution'
+
+tests\reliability\core\orchestration\test_orchestrator.py:89: AttributeError
+=========================== short test summary info ===========================
+FAILED tests/reliability/core/orchestration/test_orchestrator.py::test_same_execution_logic
+1 failed in 4.30s

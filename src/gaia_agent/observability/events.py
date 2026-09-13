@@ -19,6 +19,10 @@ class EventType(str, Enum):
 
     PLAN_CREATED = "plan_created"
     PLAN_REPLANNED = "plan_replanned"
+    PLANNING_STARTED = "planning_started"
+    PLAN_GENERATED = "plan_generated"
+    PLAN_REJECTED = "plan_rejected"
+    LOOP_DETECTED = "loop_detected"
 
     STEP_STARTED = "step_started"
     STEP_COMPLETED = "step_completed"

@@ -1,0 +1,122 @@
+﻿FFF                                                                      [100%]
+================================== FAILURES ===================================
+_____________________ test_1_success_no_retry_no_recovery _____________________
+
+    @pytest.mark.asyncio
+    async def test_1_success_no_retry_no_recovery():
+>       engine = make_engine()
+                 ^^^^^^^^^^^^^
+
+tests\reliability\test_engine.py:41: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+max_attempts = 3, max_recoveries = 2, max_total_executions = 10
+
+    def make_engine(
+        *,
+        max_attempts=3,
+        max_recoveries=2,
+        max_total_executions=10,
+    ):
+        return ReliabilityEngine(
+            error_handler=ErrorHandler(),
+            failure_classifier=FailureClassifier(),
+            retry_policy=RetryPolicy(
+                max_attempts=max_attempts,
+                base_delay=0,
+                max_delay=0,
+            ),
+>           recovery_policy=RecoveryPolicy(
+                allow_replan=True,
+            ),
+            retry=Retry(),
+            recovery=Recovery(),
+            max_recoveries=max_recoveries,
+            max_total_executions=max_total_executions,
+        )
+E       TypeError: RecoveryPolicy.__init__() got an unexpected keyword argument 'allow_replan'
+
+tests\reliability\test_engine.py:29: TypeError
+____________________ test_2_transient_failure_then_success ____________________
+
+    @pytest.mark.asyncio
+    async def test_2_transient_failure_then_success():
+>       engine = make_engine(
+            max_attempts=3,
+        )
+
+tests\reliability\test_engine.py:65: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+max_attempts = 3, max_recoveries = 2, max_total_executions = 10
+
+    def make_engine(
+        *,
+        max_attempts=3,
+        max_recoveries=2,
+        max_total_executions=10,
+    ):
+        return ReliabilityEngine(
+            error_handler=ErrorHandler(),
+            failure_classifier=FailureClassifier(),
+            retry_policy=RetryPolicy(
+                max_attempts=max_attempts,
+                base_delay=0,
+                max_delay=0,
+            ),
+>           recovery_policy=RecoveryPolicy(
+                allow_replan=True,
+            ),
+            retry=Retry(),
+            recovery=Recovery(),
+            max_recoveries=max_recoveries,
+            max_total_executions=max_total_executions,
+        )
+E       TypeError: RecoveryPolicy.__init__() got an unexpected keyword argument 'allow_replan'
+
+tests\reliability\test_engine.py:29: TypeError
+__________ test_3_recoverable_failure_replans_and_executes_new_plan ___________
+
+    @pytest.mark.asyncio
+    async def test_3_recoverable_failure_replans_and_executes_new_plan():
+>       engine = make_engine(
+            max_attempts=1,
+            max_recoveries=1,
+            max_total_executions=3,
+        )
+
+tests\reliability\test_engine.py:97: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+max_attempts = 1, max_recoveries = 1, max_total_executions = 3
+
+    def make_engine(
+        *,
+        max_attempts=3,
+        max_recoveries=2,
+        max_total_executions=10,
+    ):
+        return ReliabilityEngine(
+            error_handler=ErrorHandler(),
+            failure_classifier=FailureClassifier(),
+            retry_policy=RetryPolicy(
+                max_attempts=max_attempts,
+                base_delay=0,
+                max_delay=0,
+            ),
+>           recovery_policy=RecoveryPolicy(
+                allow_replan=True,
+            ),
+            retry=Retry(),
+            recovery=Recovery(),
+            max_recoveries=max_recoveries,
+            max_total_executions=max_total_executions,
+        )
+E       TypeError: RecoveryPolicy.__init__() got an unexpected keyword argument 'allow_replan'
+
+tests\reliability\test_engine.py:29: TypeError
+=========================== short test summary info ===========================
+FAILED tests/reliability/test_engine.py::test_1_success_no_retry_no_recovery
+FAILED tests/reliability/test_engine.py::test_2_transient_failure_then_success
+FAILED tests/reliability/test_engine.py::test_3_recoverable_failure_replans_and_executes_new_plan
+3 failed in 0.50s

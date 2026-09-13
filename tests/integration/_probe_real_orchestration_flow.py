@@ -373,7 +373,9 @@ def _make_orchestrator(
     if context_builder is None:
         context_builder = _make_context_builder()
     loop_detector = MagicMock()
-    loop_detector.check.return_value = False
+    loop_detector.check.return_value = SimpleNamespace(
+        detected=False, loop_type=None, similarity=0.0, reason='',
+    )
 
     return Orchestrator(
         context_builder=context_builder,

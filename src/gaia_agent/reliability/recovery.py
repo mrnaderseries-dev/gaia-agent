@@ -17,7 +17,7 @@ class RecoveryResult:
 
 
 class Recovery:
-    def init(
+    def __init__(
         self,
         *,
         error_handler: ErrorHandler | None = None,
@@ -25,6 +25,14 @@ class Recovery:
         self.error_handler = (
             error_handler or ErrorHandler()
         )
+
+    def init(
+        self,
+        *,
+        error_handler: ErrorHandler | None = None,
+    ) -> None:
+        if error_handler is not None:
+            self.error_handler = error_handler
 
     async def execute(
         self,

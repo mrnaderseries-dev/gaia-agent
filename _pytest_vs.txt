@@ -1,0 +1,191 @@
+﻿.......F...............F.....F                                           [100%]
+================================== FAILURES ===================================
+__________________ test_llm_can_resolve_conflicting_evidence __________________
+
+    @pytest.mark.asyncio
+    async def test_llm_can_resolve_conflicting_evidence():
+        verifier, llm = build_verifier(
+            verified_result(
+                "42 is the final result; 43 is an intermediate calculation.",
+            ),
+        )
+    
+        request = make_input(
+            candidate_answer="42",
+            raw_data=[
+                evidence(
+                    "python_interpreter",
+                    """
+                    Calculation A = 42
+                    Calculation B = 43
+                    Final result = 42
+                    """,
+                )
+            ],
+        )
+    
+        result = await verifier.verify(request)
+    
+        assert result.status == VerificationStatus.VERIFIED
+        assert result.verified is True
+>       assert len(llm.calls) == 1
+E       assert 0 == 1
+E        +  where 0 = len([])
+E        +    where [] = <test_verifier_strong.FakeLLMClient object at 0x000001DF43AF0EC0>.calls
+
+tests\agents\test_verifier_strong.py:355: AssertionError
+___________________ test_deterministic_reason_is_preserved ____________________
+
+    @pytest.mark.asyncio
+    async def test_deterministic_reason_is_preserved():
+        verifier, llm = build_verifier(
+            verified_result(
+                "This reason should never replace the deterministic reason.",
+            ),
+        )
+    
+        request = make_input(
+            candidate_answer="42",
+            raw_data=[
+                evidence(
+                    "python_interpreter",
+                    "Final result = 42",
+                )
+            ],
+        )
+    
+        result = await verifier.verify(request)
+    
+        assert result.status == VerificationStatus.VERIFIED
+        assert result.verified is True
+    
+>       assert result.reason == (
+            "The candidate is explicitly supported by a labelled result "
+            "in strong evidence."
+        )
+E       AssertionError: assert 'The candidat...ong evidence.' == 'The candidat...ong evidence.'
+E         
+E         Skipping 42 identical leading characters in diff, use -v to show
+E         -  labelled result in strong evidence.
+E         +  labelled final result in current strong evidence.
+E         ?           ++++++         ++++++++
+
+tests\agents\test_verifier_strong.py:858: AssertionError
+__________________ test_verifier_strong_end_to_end_contract ___________________
+
+    @pytest.mark.asyncio
+    async def test_verifier_strong_end_to_end_contract():
+    
+        # ------------------------------------------------------------------
+        # Case 1: deterministic VERIFIED
+        # ------------------------------------------------------------------
+    
+        verifier, llm = build_verifier(
+            invalid_result(),
+        )
+    
+        result = await verifier.verify(
+            make_input(
+                candidate_answer="42",
+                raw_data=[
+                    evidence(
+                        "python_interpreter",
+                        "Final result = 42",
+                    )
+                ],
+            )
+        )
+    
+        assert result.status == VerificationStatus.VERIFIED
+        assert result.verified is True
+        assert len(llm.calls) == 0
+    
+        # ------------------------------------------------------------------
+        # Case 2: deterministic INVALID
+        # ------------------------------------------------------------------
+    
+        verifier, llm = build_verifier(
+            verified_result(),
+        )
+    
+        result = await verifier.verify(
+            make_input(
+                candidate_answer="42",
+                raw_data=[
+                    evidence(
+                        "python_interpreter",
+                        "Final result = 100",
+                    )
+                ],
+            )
+        )
+    
+        assert result.status == VerificationStatus.INVALID
+        assert result.verified is False
+        assert len(llm.calls) == 0
+    
+        # ------------------------------------------------------------------
+        # Case 3: conflict -> semantic verifier
+        # ------------------------------------------------------------------
+    
+        verifier, llm = build_verifier(
+            conflicting_result(
+                "The evidence contains two unresolved values.",
+            ),
+        )
+    
+        result = await verifier.verify(
+            make_input(
+                candidate_answer="42",
+                raw_data=[
+                    evidence(
+                        "python_interpreter",
+                        "Calculation A = 42; Calculation B = 43",
+                    )
+                ],
+            )
+        )
+    
+        assert result.status == VerificationStatus.CONFLICTING_EVIDENCE
+        assert result.verified is False
+        assert len(llm.calls) == 1
+    
+        # ------------------------------------------------------------------
+        # Case 4: semantic verifier resolves conflict
+        # ------------------------------------------------------------------
+    
+        verifier, llm = build_verifier(
+            verified_result(
+                "42 is explicitly marked as the final result.",
+            ),
+        )
+    
+        result = await verifier.verify(
+            make_input(
+                candidate_answer="42",
+                raw_data=[
+                    evidence(
+                        "python_interpreter",
+                        """
+                        Calculation A = 42
+                        Calculation B = 43
+                        Final result = 42
+                        """,
+                    )
+                ],
+            )
+        )
+    
+        assert result.status == VerificationStatus.VERIFIED
+        assert result.verified is True
+>       assert len(llm.calls) == 1
+E       assert 0 == 1
+E        +  where 0 = len([])
+E        +    where [] = <test_verifier_strong.FakeLLMClient object at 0x000001DF43B90D70>.calls
+
+tests\agents\test_verifier_strong.py:1096: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/agents/test_verifier_strong.py::test_llm_can_resolve_conflicting_evidence
+FAILED tests/agents/test_verifier_strong.py::test_deterministic_reason_is_preserved
+FAILED tests/agents/test_verifier_strong.py::test_verifier_strong_end_to_end_contract
+3 failed, 27 passed in 0.61s
