@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from gaia_agent.context.models import FinalContext
+from gaia_agent.planner.models import PlanningResult
 from gaia_agent.planner.plan_schema import (
     PlanSchema,
     PlanStep,
@@ -37,6 +38,11 @@ from gaia_agent.planner.tool_spec import (
     ToolSpec,
 )
 from gaia_agent.reliability.errors import AgentError
+
+
+# ============================================================================
+# Test fixtures / helpers
+# ============================================================================
 
 
 def make_tools() -> dict[str, ToolSpec]:
@@ -242,7 +248,13 @@ def analysis_for(
     )
 
 
+# ============================================================================
+# Task Classifier
+# ============================================================================
+
+
 class TestTaskClassifierAdversarial:
+
     def test_arithmetic_forbids_web(self) -> None:
         analysis = analysis_for("Calculate 91 * 37.")
 
@@ -264,7 +276,9 @@ class TestTaskClassifierAdversarial:
         assert analysis.intent == TaskIntent.TEXT_TRANSFORMATION
 
     def test_factorial_ratio_detector(self) -> None:
-        assert detect_factorial_ratio("What is 10! / 5!?") == (
+        assert detect_factorial_ratio(
+            "What is 10! / 5!?"
+        ) == (
             10,
             5,
         )
@@ -331,7 +345,13 @@ class TestTaskClassifierAdversarial:
         }
 
 
+# ============================================================================
+# Strategy Selector
+# ============================================================================
+
+
 class TestStrategySelectorAdversarial:
+
     def test_arithmetic_selects_python(self) -> None:
         analysis = analysis_for(
             "Calculate 10 * 50."
@@ -361,7 +381,9 @@ class TestStrategySelectorAdversarial:
         decision = StrategySelector().select(
             analysis,
             StrategyContext(
-                available_tools=frozenset(tools.keys())
+                available_tools=frozenset(
+                    tools.keys()
+                )
             ),
         )
 
@@ -472,7 +494,9 @@ class TestStrategySelectorAdversarial:
         decision = StrategySelector().select(
             analysis,
             StrategyContext(
-                available_tools=frozenset(tools.keys())
+                available_tools=frozenset(
+                    tools.keys()
+                )
             ),
         )
 
@@ -515,7 +539,6 @@ class TestStrategySelectorAdversarial:
         analysis = analysis_for(
             "Find the official GAIA website."
         )
-
         decision = StrategySelector().select(
             analysis,
             StrategyContext(
@@ -530,7 +553,13 @@ class TestStrategySelectorAdversarial:
         assert decision.strategy != StrategyFamily.WEB_RETRIEVAL
 
 
+# ============================================================================
+# Tool Specification
+# ============================================================================
+
+
 class TestToolSpecContracts:
+
     def test_tool_spec_is_frozen(self) -> None:
         spec = make_tools()["web_search"]
 
@@ -543,6 +572,7 @@ class TestToolSpecContracts:
         assert spec.supports_capability(
             ToolCapability.COMPUTATION
         )
+
         assert not spec.supports_capability(
             ToolCapability.NETWORK_READ
         )
@@ -591,7 +621,13 @@ class TestToolSpecContracts:
         )
 
 
+# ============================================================================
+# Plan Schema
+# ============================================================================
+
+
 class TestPlanSchemaAdversarial:
+
     def test_valid_multi_step_plan(self) -> None:
         plan = PlanSchema(
             steps=[
@@ -736,7 +772,13 @@ class TestPlanSchemaAdversarial:
         assert step.tool_name is None
 
 
+# ============================================================================
+# Semantic Plan Validator
+# ============================================================================
+
+
 class TestSemanticValidatorAdversarial:
+
     def test_arithmetic_cannot_use_web_search(self) -> None:
         analysis = analysis_for(
             "Calculate 25 * 4."
@@ -786,7 +828,6 @@ class TestSemanticValidatorAdversarial:
                 )
             ),
         )
-
         plan = PlanSchema(
             steps=[
                 tool_step(
@@ -828,7 +869,9 @@ class TestSemanticValidatorAdversarial:
                 tool_step(
                     0,
                     tool_name="web_search",
-                    arguments={"query": "7 * 8"},
+                    arguments={
+                        "query": "7 * 8"
+                    },
                 ),
                 final_step(1),
             ]
@@ -880,13 +923,22 @@ class TestSemanticValidatorAdversarial:
         )
 
 
+# ============================================================================
+# Planner Subsystem
+# ============================================================================
+
+
 class TestPlannerSubsystemAdversarial:
+
     @pytest.mark.asyncio
     async def test_planner_does_not_allow_llm_to_escape_strategy(
         self,
     ) -> None:
         client = AsyncMock()
 
+        # IMPORTANT:
+        # The LLM client returns PlanSchema.
+        # Planner wraps it into PlanningResult.
         client.generate.return_value = PlanSchema(
             steps=[
                 tool_step(
@@ -906,9 +958,10 @@ class TestPlannerSubsystemAdversarial:
             "Calculate 7 * 8."
         )
 
-        assert isinstance(result, PlanSchema)
+        assert isinstance(result, PlanningResult)
+        assert isinstance(result.plan, PlanSchema)
 
-        for step in result.steps:
+        for step in result.plan.steps:
             if step.step_type == StepType.TOOL:
                 assert step.tool_name != "web_search"
 
@@ -918,18 +971,20 @@ class TestPlannerSubsystemAdversarial:
     ) -> None:
         client = AsyncMock()
 
-        client.generate.return_value = PlanSchema.model_construct(
-            steps=[
-                PlanStep(
-                    step_id=0,
-                    action="Use a fake tool",
-                    step_type=StepType.TOOL,
-                    tool_name="totally_fake_tool",
-                    arguments={},
-                    is_final_answer=False,
-                ),
-                final_step(1),
-            ]
+        client.generate.return_value = (
+            PlanSchema.model_construct(
+                steps=[
+                    PlanStep(
+                        step_id=0,
+                        action="Use a fake tool",
+                        step_type=StepType.TOOL,
+                        tool_name="totally_fake_tool",
+                        arguments={},
+                        is_final_answer=False,
+                    ),
+                    final_step(1),
+                ]
+            )
         )
 
         planner = make_planner(client)
@@ -940,10 +995,10 @@ class TestPlannerSubsystemAdversarial:
 
         assert all(
             step.tool_name != "totally_fake_tool"
-            for step in result.steps
+            for step in result.plan.steps
         )
 
-        assert result.steps[-1].is_final_answer
+        assert result.plan.steps[-1].is_final_answer
 
     @pytest.mark.asyncio
     async def test_planner_fallback_still_obeys_final_answer_contract(
@@ -961,18 +1016,22 @@ class TestPlannerSubsystemAdversarial:
             "Find information about GAIA."
         )
 
-        assert isinstance(result, PlanSchema)
-        assert len(result.steps) >= 1
+        assert isinstance(result, PlanningResult)
+        assert isinstance(result.plan, PlanSchema)
+        assert len(result.plan.steps) >= 1
 
         final_steps = [
             step
-            for step in result.steps
+            for step in result.plan.steps
             if step.is_final_answer
         ]
 
         assert len(final_steps) == 1
-        assert result.steps[-1].is_final_answer
-        assert result.steps[-1].step_type == StepType.LLM
+        assert result.plan.steps[-1].is_final_answer
+        assert (
+            result.plan.steps[-1].step_type
+            == StepType.LLM
+        )
 
     @pytest.mark.asyncio
     async def test_planner_final_context_is_not_flattened(
@@ -1029,7 +1088,6 @@ class TestPlannerSubsystemAdversarial:
         self,
     ) -> None:
         client = AsyncMock()
-
         planner = make_planner(client)
 
         with pytest.raises(
@@ -1068,7 +1126,6 @@ class TestPlannerSubsystemAdversarial:
         )
 
         planner = make_planner(client)
-
         result = await planner.replan(
             user_question="What is GAIA?",
             context=FinalContext(
@@ -1087,8 +1144,12 @@ class TestPlannerSubsystemAdversarial:
             ),
         )
 
-        assert isinstance(result, PlanSchema)
-        assert result.steps[0].tool_name == "visit_webpage"
+        assert isinstance(result, PlanningResult)
+        assert isinstance(result.plan, PlanSchema)
+        assert (
+            result.plan.steps[0].tool_name
+            == "visit_webpage"
+        )
 
     @pytest.mark.asyncio
     async def test_replan_rejects_unchanged_failed_signature(
@@ -1099,7 +1160,9 @@ class TestPlannerSubsystemAdversarial:
         failed_step = tool_step(
             0,
             tool_name="web_search",
-            arguments={"query": "same query"},
+            arguments={
+                "query": "same query"
+            },
         )
 
         client.generate.return_value = PlanSchema(
@@ -1107,7 +1170,9 @@ class TestPlannerSubsystemAdversarial:
                 tool_step(
                     0,
                     tool_name="web_search",
-                    arguments={"query": "same query"},
+                    arguments={
+                        "query": "same query"
+                    },
                 ),
                 final_step(1),
             ]
@@ -1156,7 +1221,10 @@ class TestPlannerSubsystemAdversarial:
             "What is the official GAIA website?"
         )
 
-        assert result.steps[0].arguments == expected_arguments
+        assert (
+            result.plan.steps[0].arguments
+            == expected_arguments
+        )
 
     @pytest.mark.asyncio
     async def test_planner_does_not_accept_tool_as_final_answer(
@@ -1169,9 +1237,12 @@ class TestPlannerSubsystemAdversarial:
             action="Search",
             step_type=StepType.TOOL,
             tool_name="web_search",
-            arguments={"query": "GAIA"},
+            arguments={
+                "query": "GAIA"
+            },
             is_final_answer=True,
         )
+
         malformed = PlanSchema.model_construct(
             steps=[malformed_step]
         )
@@ -1184,8 +1255,12 @@ class TestPlannerSubsystemAdversarial:
             "What is GAIA?"
         )
 
-        assert result.steps[-1].step_type == StepType.LLM
-        assert result.steps[-1].is_final_answer
+        assert (
+            result.plan.steps[-1].step_type
+            == StepType.LLM
+        )
+
+        assert result.plan.steps[-1].is_final_answer
 
     @pytest.mark.asyncio
     async def test_attachment_evidence_changes_planner_information(
@@ -1205,7 +1280,6 @@ class TestPlannerSubsystemAdversarial:
             items=[],
             token_count=0,
         )
-
         context_with = FinalContext(
             items=[
                 {
@@ -1223,9 +1297,9 @@ class TestPlannerSubsystemAdversarial:
         )
 
         prompt_without = "\n".join(
-            str(m.get("content", ""))
-            for m in client.generate.call_args.args[0]
-            if isinstance(m, dict)
+            str(message.get("content", ""))
+            for message in client.generate.call_args.args[0]
+            if isinstance(message, dict)
         )
 
         client.reset_mock()
@@ -1236,9 +1310,9 @@ class TestPlannerSubsystemAdversarial:
         )
 
         prompt_with = "\n".join(
-            str(m.get("content", ""))
-            for m in client.generate.call_args.args[0]
-            if isinstance(m, dict)
+            str(message.get("content", ""))
+            for message in client.generate.call_args.args[0]
+            if isinstance(message, dict)
         )
 
         assert "ATTACHMENT_FACT_XYZ" not in prompt_without
@@ -1269,9 +1343,9 @@ class TestPlannerSubsystemAdversarial:
         )
 
         prompt = "\n".join(
-            str(m.get("content", ""))
-            for m in client.generate.call_args.args[0]
-            if isinstance(m, dict)
+            str(message.get("content", ""))
+            for message in client.generate.call_args.args[0]
+            if isinstance(message, dict)
         )
 
         assert "987654321" not in prompt
@@ -1305,7 +1379,7 @@ class TestPlannerSubsystemAdversarial:
             "What is GAIA?"
         )
 
-        final = result.steps[-1]
+        final = result.plan.steps[-1]
 
         assert final.is_final_answer
         assert final.step_type == StepType.LLM
@@ -1328,9 +1402,18 @@ class TestPlannerSubsystemAdversarial:
 
         context = FinalContext(
             items=[
-                {"id": "A", "value": "FIRST_UNIQUE"},
-                {"id": "B", "value": "SECOND_UNIQUE"},
-                {"id": "C", "value": "THIRD_UNIQUE"},
+                {
+                    "id": "A",
+                    "value": "FIRST_UNIQUE",
+                },
+                {
+                    "id": "B",
+                    "value": "SECOND_UNIQUE",
+                },
+                {
+                    "id": "C",
+                    "value": "THIRD_UNIQUE",
+                },
             ],
             token_count=30,
         )
@@ -1341,18 +1424,22 @@ class TestPlannerSubsystemAdversarial:
         )
 
         prompt = "\n".join(
-            str(m.get("content", ""))
-            for m in client.generate.call_args.args[0]
-            if isinstance(m, dict)
+            str(message.get("content", ""))
+            for message in client.generate.call_args.args[0]
+            if isinstance(message, dict)
         )
 
         assert "FIRST_UNIQUE" in prompt
         assert "SECOND_UNIQUE" in prompt
         assert "THIRD_UNIQUE" in prompt
 
-        assert prompt.index("FIRST_UNIQUE") < prompt.index(
+        assert prompt.index(
+            "FIRST_UNIQUE"
+        ) < prompt.index(
             "SECOND_UNIQUE"
         )
-        assert prompt.index("SECOND_UNIQUE") < prompt.index(
+        assert prompt.index(
+            "SECOND_UNIQUE"
+        ) < prompt.index(
             "THIRD_UNIQUE"
         )

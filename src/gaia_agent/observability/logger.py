@@ -49,3 +49,4 @@ class LoggingEventSink:
             f"error={event.error} "
             f"metadata={event.metadata}"
         )
+EventLogger = LoggingEventSink

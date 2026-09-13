@@ -40,6 +40,7 @@ class ErrorCategory(str, Enum):
     APPROVAL_BLOCKED = "approval_blocked"
     TRANSITION_FAILURE = "transition_failure"
     LOOP_DETECTED = "loop_detected"
+    STATE_TRANSITION_ERROR = "state_transition_error"
 
 
 class ErrorSeverity(str, Enum):

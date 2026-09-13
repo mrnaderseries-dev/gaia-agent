@@ -64,7 +64,7 @@ from gaia_agent.reliability.loop_detector import (
 
 class Orchestrator:
 
-    def init(
+    def __init__(
         self,
         *,
         context_builder: ContextBuilder,
@@ -229,7 +229,7 @@ class Orchestrator:
             await self.generate_initial_plan()
             return None
 
-        step = runtime.plan_runtime.current()
+        step = runtime.plan_runtime.current
 
         if step is None:
             return self._finish_if_possible()
@@ -278,7 +278,7 @@ class Orchestrator:
             step,
             strategy,
         ):
-            return await self._handle_loop(
+            return self._handle_loop(
                 step
             )
 

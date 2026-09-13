@@ -17,12 +17,14 @@ class RecoveryResult:
 
 
 class Recovery:
-    def __init__(
+    def init(
         self,
         *,
         error_handler: ErrorHandler | None = None,
     ) -> None:
-        self.error_handler = error_handler or ErrorHandler()
+        self.error_handler = (
+            error_handler or ErrorHandler()
+        )
 
     async def execute(
         self,
@@ -37,8 +39,10 @@ class Recovery:
             bool,
         ] | None = None,
     ) -> RecoveryResult:
+
         try:
             result = await operation(error)
+
         except Exception as exception:
             recovery_error = self.error_handler.handle(
                 exception,
@@ -55,12 +59,17 @@ class Recovery:
                 error=recovery_error,
             )
 
+        # No change detector means that successful
+        # completion of the recovery operation itself
+        # is considered sufficient.
         if change_detector is None:
             return RecoveryResult(
                 recovered=True,
                 result=result,
                 changed=True,
-                reason="Recovery produced a meaningful change.",
+                reason=(
+                    "Recovery produced a meaningful change."
+                ),
                 error=None,
             )
 
@@ -68,6 +77,7 @@ class Recovery:
             changed = bool(
                 change_detector(result)
             )
+
         except Exception as exception:
             validation_error = self.error_handler.handle(
                 exception,
@@ -80,7 +90,9 @@ class Recovery:
                 recovered=False,
                 result=result,
                 changed=False,
-                reason="Recovery change validation failed.",
+                reason=(
+                    "Recovery change validation failed."
+                ),
                 error=validation_error,
             )
 
@@ -89,7 +101,9 @@ class Recovery:
                 recovered=False,
                 result=result,
                 changed=False,
-                reason="Recovery produced no meaningful change.",
+                reason=(
+                    "Recovery produced no meaningful change."
+                ),
                 error=None,
             )
 
@@ -97,6 +111,8 @@ class Recovery:
             recovered=True,
             result=result,
             changed=True,
-            reason="Recovery produced a meaningful change.",
+            reason=(
+                "Recovery produced a meaningful change."
+            ),
             error=None,
         )

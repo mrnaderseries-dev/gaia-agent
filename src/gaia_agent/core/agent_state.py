@@ -155,6 +155,7 @@ class AgentState:
         ),
         AgentPhase.EXECUTING: frozenset(
             {
+                AgentPhase.PLANNING,
                 AgentPhase.VERIFYING,
                 AgentPhase.FAILED,
                 AgentPhase.TERMINATED,
@@ -193,7 +194,7 @@ class AgentState:
                 error_type="InvalidPhase",
                 message=(
                     "Invalid phase type: "
-                    f"{type(new_phase).name}"
+                    f"{type(new_phase).__name__}"
                 ),
                 category=ErrorCategory.VALIDATION,
                 severity=ErrorSeverity.HIGH,

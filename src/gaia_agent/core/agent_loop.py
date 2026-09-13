@@ -17,7 +17,7 @@ from gaia_agent.core.policies.termination import (
 
 class AgentLoop:
 
-    def init(
+    def __init__(
         self,
         *,
         orchestrator: Orchestrator,
