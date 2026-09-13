@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from time import perf_counter
+from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Any
 
 from gaia_agent.agents.verifier import (
     VerificationInput,
-    VerifierAgent,
+    VerificationResult,
     VerificationStatus,
+    VerifierAgent,
 )
-from gaia_agent.context.ContextBuilder import (
-    ContextBuilder,
-)
-from gaia_agent.context.models import FinalContext
-from gaia_agent.context.request_builder import (
-    ContextRequestBuilder,
+from gaia_agent.context.ContextBuilder import ContextBuilder
+from gaia_agent.context.models import (
+    ContextRequest,
+    FinalContext,
 )
 from gaia_agent.core.agent_execution import (
     AgentExecution,
@@ -25,25 +25,8 @@ from gaia_agent.core.agent_state import (
     AgentState,
     TransitionReason,
 )
-from gaia_agent.core.orchestration.models import (
-    OrchestrationContext,
-)
-from gaia_agent.core.policies.termination import (
-    TerminationReason,
-)
-from gaia_agent.observability.events import (
-    EventType,
-    create_event,
-)
-from gaia_agent.observability.logger import (
-    EventLogger,
-)
-from gaia_agent.observability.metrics import (
-    Metrics,
-)
-from gaia_agent.observability.tracer import (
-    Tracer,
-)
+from gaia_agent.observability.events import EventType
+from gaia_agent.observability.facade import Observability
 from gaia_agent.planner.plan_schema import (
     PlanSchema,
     PlanStep,
@@ -53,16 +36,60 @@ from gaia_agent.planner.planner import (
     Planner,
     PlannerRecoveryRequired,
 )
+from gaia_agent.planner.task_classifier import (
+    TaskAnalysis,
+)
 from gaia_agent.reliability.engine import (
     ReliabilityAction,
     ReliabilityEngine,
+)
+from gaia_agent.reliability.errors import (
+    AgentError,
+    ErrorCategory,
+    ErrorSeverity,
 )
 from gaia_agent.reliability.loop_detector import (
     LoopDetector,
 )
 
+from .models import (
+    OrchestrationAction,
+    OrchestrationContext,
+    OrchestrationOutcome,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OrchestratorConfig:
+    """Configuration settings for the Orchestrator limits."""
+    max_step_attempts: int = 3
+    max_verification_attempts: int = 2
+    max_replans: int = 3
+
 
 class Orchestrator:
+    """
+    Central orchestration control plane.
+
+    Responsibilities:
+        - coordinate ContextBuilder
+        - request planning
+        - install PlanningResult
+        - execute PlanStep
+        - delegate failures to ReliabilityEngine
+        - perform replanning when Reliability requests it
+        - coordinate verification
+        - synchronize AgentState projections
+        - emit orchestration observability
+
+    Not responsible for:
+        - task classification
+        - strategy selection
+        - tool execution internals
+        - retry policy
+        - recovery policy
+        - verification semantics
+    """
 
     def __init__(
         self,
@@ -73,929 +100,1082 @@ class Orchestrator:
         reliability_engine: ReliabilityEngine,
         loop_detector: LoopDetector,
         verifier: VerifierAgent,
-        event_logger: EventLogger | None = None,
-        metrics: Metrics | None = None,
-        tracer: Tracer | None = None,
-        max_execution_attempts: int = 3,
-        max_verification_attempts: int = 2,
+        observability: Observability | None = None,
+        config: OrchestratorConfig | None = None,
     ) -> None:
-
-        self._context_builder = context_builder
-        self._planner = planner
-        self._agent_execution = agent_execution
-        self._reliability = reliability_engine
-        self._loop_detector = loop_detector
-        self._verifier = verifier
-
-        self._event_logger = event_logger
-        self._metrics = metrics
-        self._tracer = tracer
-
-        self._max_execution_attempts = (
-            max_execution_attempts
+        """Initialize the orchestrator with required dependencies and configuration."""
+        self.context_builder = context_builder
+        self.planner = planner
+        self.agent_execution = agent_execution
+        self.reliability = reliability_engine
+        self.loop_detector = loop_detector
+        self.verifier = verifier
+        self.observability = observability
+        self.config = (
+            config
+            or OrchestratorConfig()
         )
 
-        self._max_verification_attempts = (
-            max_verification_attempts
-        )
-
-        self._state: AgentState | None = None
-        self._context: OrchestrationContext | None = None
-
-    def bind_state(
+    async def start(
         self,
         state: AgentState,
-    ) -> None:
-
-        if self._state is not None:
-            raise RuntimeError(
-                "Orchestrator is already bound."
-            )
-
+        *,
+        run: OrchestrationContext | None = None,
+    ) -> OrchestrationContext:
+        """Start the orchestration run and initialize states."""
         if not state.user_request.strip():
             raise ValueError(
-                "AgentState.user_request cannot be empty."
+                "user_request cannot be empty"
             )
 
-        self._state = state
-
-        run_id = (
-            state.metadata.get("run_id")
-            if state.metadata
-            else None
-        )
-
-        if not run_id:
-            import uuid
-
-            run_id = str(uuid.uuid4())
-
-            state.metadata["run_id"] = run_id
-
-        self._context = (
-            OrchestrationContext(
-                user_request=(
-                    state.user_request
-                ),
-                run_id=run_id,
+        run = (
+            run
+            or OrchestrationContext(
+                user_request=state.user_request
             )
         )
 
-    def unbind(self) -> None:
-        self._state = None
-        self._context = None
+        if (
+            run.user_request
+            != state.user_request
+        ):
+            raise ValueError(
+                "OrchestrationContext.user_request "
+                "must match AgentState.user_request."
+            )
 
-    async def generate_initial_plan(
-        self,
-    ) -> PlanSchema:
-
-        state = self._require_state()
-        runtime = self._require_context()
-
-        if state.phase == AgentPhase.IDLE:
+        if state.phase is AgentPhase.IDLE:
             state.transition(
                 AgentPhase.PLANNING,
                 reason=TransitionReason.START,
             )
 
-        context = await self._build_context()
-
-        span = self._start_span(
-            "orchestration.planning"
+        self._emit(
+            EventType.AGENT_STARTED,
+            run,
         )
 
-        try:
+        return run
 
-            plan = await self._planner.generate_plan(
-                runtime.user_request,
-                context,
-            )
-
-            self._validate_plan(plan)
-
-            runtime.plan_runtime.install_plan(
-                plan
-            )
-
-            state.plan = list(
-                plan.steps
-            )
-
-            state.current_step = 0
-
-            state.transition(
-                AgentPhase.EXECUTING,
-                reason=(
-                    TransitionReason.PLAN_READY
-                ),
-            )
-
-            self._increment(
-                "plans_created"
-            )
-
-            return plan
-
-        except PlannerRecoveryRequired:
-            state.transition(
-                AgentPhase.FAILED,
-                reason=(
-                    TransitionReason.EXECUTION_FAILED
-                ),
-            )
-            raise
-
-        finally:
-            self._end_span(span)
-
-    async def run_iteration(
+    async def step(
         self,
-    ) -> ExecutionResult | None:
+        state: AgentState,
+        run: OrchestrationContext,
+    ) -> OrchestrationOutcome:
+        """
+        Execute exactly one orchestration cycle.
 
-        state = self._require_state()
-        runtime = self._require_context()
+        AgentLoop owns repetition.
+        Orchestrator owns the decision for this cycle.
+        """
+        run.iteration += 1
+        state.iteration = run.iteration
 
         if state.phase in {
             AgentPhase.COMPLETED,
             AgentPhase.FAILED,
             AgentPhase.TERMINATED,
         }:
-            return None
-
-        runtime.iteration += 1
-        state.iteration = runtime.iteration
-
-        if runtime.plan_runtime.plan is None:
-            await self.generate_initial_plan()
-            return None
-
-        step = runtime.plan_runtime.current
-
-        if step is None:
-            return self._finish_if_possible()
-
-        state.current_step = (
-            step.step_id
-        )
-
-        state.current_action = (
-            step.action
-        )
-
-        state.step_type = (
-            step.step_type
-        )
-
-        state.tool_name = (
-            step.tool_name
-        )
-
-        state.tool_arguments = dict(
-            step.arguments
-        )
-
-        context = await self._build_context()
-
-        return await self._execute_step(
-            step=step,
-            context=context,
-        )
-
-    async def _execute_step(
-        self,
-        *,
-        step: PlanStep,
-        context: FinalContext,
-    ) -> ExecutionResult:
-
-        runtime = self._require_context()
-
-        strategy = self._strategy_key(
-            step
-        )
-
-        if self._loop_detector.check(
-            step,
-            strategy,
-        ):
-            return self._handle_loop(
-                step
+            return OrchestrationOutcome(
+                OrchestrationAction.TERMINATE,
+                reason=state.phase.value,
             )
 
-        attempt = self._step_attempt_count(
-            step.step_id
-        ) + 1
+        try:
+            with self._span(
+                "agent.step",
+                run.observability,
+            ):
+                context = await self._build_context(
+                    state,
+                    run,
+                )
+
+                if (
+                    run.plan_runtime.plan
+                    is None
+                ):
+                    return await self._plan(
+                        state,
+                        run,
+                        context,
+                    )
+
+             
+                step = (
+                    run.plan_runtime.current()
+                )
+
+                if step is None:
+                    if (
+                        run.final_answer
+                        is not None
+                    ):
+                        return OrchestrationOutcome(
+                            OrchestrationAction.COMPLETE,
+                            reason="plan_complete",
+                        )
+
+                    # Defensive recovery: a plan existed but no
+                    # executable current step remains and no answer exists.
+                    return await self._plan(
+                        state,
+                        run,
+                        context,
+                    )
+                return await self._execute(
+                    state,
+                    run,
+                    step,
+                    context,
+                )
+
+        except AgentError as error:
+            self._fail(
+                state,
+                error,
+            )
+
+            self._emit(
+                EventType.AGENT_FAILED,
+                run,
+                error=error,
+            )
+
+            return OrchestrationOutcome(
+                OrchestrationAction.FAIL,
+                error=error,
+                reason=error.message,
+            )
+
+        except Exception as exc:
+            error = AgentError(
+                error_type=type(exc).name,
+                message=(
+                    str(exc)
+                    or type(exc).name
+                ),
+                category=ErrorCategory.INTERNAL,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="Orchestrator",
+                operation="step",
+                original_exception=exc,
+            )
+
+            self._fail(
+                state,
+                error,
+            )
+
+            self._emit(
+                EventType.AGENT_FAILED,
+                run,
+                error=error,
+            )
+
+            return OrchestrationOutcome(
+                OrchestrationAction.FAIL,
+                error=error,
+                reason=error.message,
+            )
+    async def _build_context(
+        self,
+        state: AgentState,
+        run: OrchestrationContext,
+    ) -> FinalContext:
+        """Build context required for execution and planning."""
+        request = ContextRequest(
+            user_request=run.user_request,
+            attachments=tuple(
+                state.attachments
+            ),
+            plan=(
+                list(
+                    run.plan_runtime.plan.steps
+                )
+                if run.plan_runtime.plan
+                else []
+            ),
+            current_step=(
+                run.plan_runtime.current_step
+            ),
+            completed_steps=sorted(
+                run.plan_runtime.completed_steps
+            ),
+            iteration=run.iteration,
+        )
+
+        return await self.context_builder.build(
+            request
+        )
+    async def _plan(
+        self,
+        state: AgentState,
+        run: OrchestrationContext,
+        context: FinalContext,
+    ) -> OrchestrationOutcome:
+        """Generate and install a new execution plan."""
+        self._emit(
+            EventType.PLANNING_STARTED,
+            run,
+        )
+
+        try:
+            planning_result = (
+                await self.planner.generate_plan(
+                    run.user_request,
+                    context,
+                )
+            )
+
+            self._install_planning_result(
+                state,
+                run,
+                planning_result,
+            )
+
+        except PlannerRecoveryRequired as exc:
+            error = self._planner_error(
+                exc,
+                operation="generate_plan",
+            )
+
+            self._fail(
+                state,
+                error,
+            )
+
+            self._emit(
+                EventType.PLAN_REJECTED,
+                run,
+                error=error,
+            )
+
+            return OrchestrationOutcome(
+                OrchestrationAction.FAIL,
+                error=error,
+                reason=error.message,
+            )
+
+        self._emit(
+            EventType.PLAN_GENERATED,
+            run,
+            metadata={
+                "steps": len(
+                    run.plan_runtime.plan.steps
+                ),
+                "task_intent": (
+                    run.task_analysis.intent.value
+                    if run.task_analysis
+                    else None
+                ),
+            },
+        )
+
+        return OrchestrationOutcome(
+            OrchestrationAction.EXECUTE,
+            reason="plan_ready",
+        )
+
+    def _install_planning_result(
+        self,
+        state: AgentState,
+        run: OrchestrationContext,
+        planning_result: Any,
+    ) -> None:
+        """
+        Install Planner output as one atomic orchestration contract.
+
+        PlanningResult:
+            plan
+            task_analysis
+        """
+        run.install_planning_result(
+            planning_result
+        )
+
+        plan = run.plan_runtime.plan
+
+        if plan is None:
+            raise ValueError(
+                "Planner returned no plan."
+            )
+
+        self._validate_plan(plan)
+
+        # AgentState is a projection, not the SSOT.
+        state.plan = list(
+            plan.steps
+        )
+        state.current_step = (
+            run.plan_runtime.current_step
+        )
+        state.completed_steps.clear()
+        state.replan_count = (
+            run.plan_runtime.replan_count
+        )
+
+        # Keep semantic metadata visible for external state/debugging.
+        state.metadata[
+            "task_intent"
+        ] = run.task_analysis.intent.value
+
+        state.metadata[
+            "task_analysis"
+        ] = run.task_analysis.analysis_text
+
+        if state.phase is AgentPhase.PLANNING:
+            state.transition(
+                AgentPhase.EXECUTING,
+                reason=TransitionReason.PLAN_READY,
+            )
+
+    async def _execute(
+        self,
+        state: AgentState,
+        run: OrchestrationContext,
+        step: PlanStep,
+        context: FinalContext,
+    ) -> OrchestrationOutcome:
+        """Execute a single plan step and handle outcomes."""
+        step_id = step.step_id
+
+        ctx = run.observability.child(
+            step_id=step_id,
+        )
+
+        strategy_family = (
+            self.planner.strategy_family(
+                step
+            )
+        )
+
+        loop = self.loop_detector.check(
+            step,
+            strategy_family=strategy_family,
+        )
+
+        if loop.detected:
+            self._emit(
+                EventType.LOOP_DETECTED,
+                run,
+                metadata={
+                    "step_id": step_id,
+                    "reason": loop.reason,
+                },
+            )
+
+            error = AgentError(
+                error_type="ExecutionLoopDetected",
+                message=loop.reason,
+                category=ErrorCategory.LOOP_DETECTED,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="Orchestrator",
+                operation="execute",
+            )
+
+            self._fail(
+                state,
+                error,
+            )
+
+            return OrchestrationOutcome(
+                OrchestrationAction.FAIL,
+                error=error,
+            )
+
+        run.current_attempt += 1
 
         request = ExecutionRequest(
-            step_id=step.step_id,
+            step_id=step_id,
             step_type=step.step_type,
             action=step.action,
             tool_name=step.tool_name,
             arguments=dict(
                 step.arguments
             ),
-            user_request=(
-                runtime.user_request
-            ),
+            user_request=run.user_request,
             context=context,
-            iteration=runtime.iteration,
-            correlation_id=(
-                self._agent_execution
-                .correlation_id
-            ),
+            iteration=run.iteration,
+            correlation_id=run.correlation_id,
             metadata={
-                "run_id": runtime.run_id,
-                "plan_version": (
-                    runtime.plan_runtime
-                    .plan_version
+                "run_id": str(
+                    run.run_id
                 ),
-                "attempt": attempt,
+                "attempt": (
+                    run.current_attempt
+                ),
+                "plan_version": (
+                    run.plan_runtime.replan_count
+                ),
             },
         )
 
-        result = await self._agent_execution.execute(
-            request
+        self._emit(
+            EventType.STEP_STARTED,
+            run,
         )
 
-        runtime.record_execution(
-            step_id=step.step_id,
-            result=result,
-            attempt=attempt,
+        result = (
+            await self.agent_execution.execute(
+                request
+            )
         )
 
-        self._sync_state_after_execution(
-            step,
+        run.record_execution(
+            step_id,
             result,
         )
 
-        if result.success:
-
-            runtime.plan_runtime.mark_completed(
-                step.step_id
-            )
-
-            if step.is_final_answer:
-                return await self._verify_final_answer(
-                    step=step,
-                    result=result,
-                    context=context,
-                )
-
-            runtime.plan_runtime.advance()
-
-            return result
-
-        return await self._handle_execution_failure(
-            step=step,
-            result=result,
-            context=context,
-        )
-
-    async def _handle_execution_failure(
-        self,
-        *,
-        step: PlanStep,
-        result: ExecutionResult,
-        context: FinalContext,
-    ) -> ExecutionResult:
-
-        if result.error is None:
-            return result
-
-        runtime = self._require_context()
-
-        attempt = self._step_attempt_count(
-            step.step_id
-        )
-
-        reliability = (
-            await self._reliability.handle_failure(
-                error=result.error,
-                attempt=attempt,
-                max_attempts=(
-                    self._max_execution_attempts
-                ),
-            )
-        )
-
-        self._increment(
-            f"reliability.{reliability.action.value}"
-        )
-
-        if (
-            reliability.action
-            == ReliabilityAction.RETRY
-        ):
-
-            return await self._execute_step(
-                step=step,
-                context=context,
-            )
-
-        if (
-            reliability.action
-            == ReliabilityAction.REPLAN
-        ):
-
-            return await self._replan_after_failure(
-                step=step,
-                failure=result.error,
-            )
-
-        self._mark_failed(
-            result.error.message
-        )
-
-        return result
-
-    async def _replan_after_failure(
-        self,
-        *,
-        step: PlanStep,
-        failure: Any,
-    ) -> ExecutionResult:
-
-        runtime = self._require_context()
-        state = self._require_state()
-
-        state.transition(
-            AgentPhase.PLANNING,
-            reason=TransitionReason.RECOVERY,
-        )
-
-        context = await self._build_context()
-
-        try:
-
-            plan = await self._planner.replan(
-                user_question=(
-                    runtime.user_request
-                ),
-                context=context,
-                failed_step=step,
-                failure=str(failure),
-            )
-
-            self._validate_plan(plan)
-
-            runtime.plan_runtime.install_plan(
-                plan
-            )
-
-            state.plan = list(
-                plan.steps
-            )
-
-            state.replan_count += 1
-
-            state.current_step = 0
-
-            state.transition(
-                AgentPhase.EXECUTING,
-                reason=TransitionReason.RECOVERY,
-            )
-
-            return ExecutionResult(
-                success=False,
-                step_id=step.step_id,
-                metadata={
-                    "replanned": True,
-                    "plan_version": (
-                        runtime.plan_runtime
-                        .plan_version
-                    ),
-                },
-            )
-
-        except Exception as exc:
-
-            self._mark_failed(
-                str(exc)
-            )
-
-            return ExecutionResult(
-                success=False,
-                step_id=step.step_id,
-                error=exc,
-            )
-
-    async def _verify_final_answer(
-        self,
-        *,
-        step: PlanStep,
-        result: ExecutionResult,
-        context: FinalContext,
-    ) -> ExecutionResult:
-
-        state = self._require_state()
-        runtime = self._require_context()
-
-        answer = self._extract_answer(
+        state.execution_results.append(
             result
         )
 
-        if not answer:
+        if result.blocked:
+            state.blocked = True
+            state.waiting_for_approval = True
 
-            return await self._handle_verification_failure(
+            self._emit(
+                EventType.APPROVAL_REQUIRED,
+                run,
+            )
+
+            return OrchestrationOutcome(
+                OrchestrationAction.WAIT_FOR_APPROVAL,
+                result=result,
+                reason="approval_required",
+            )
+
+        if not result.success:
+            self._emit(
+                EventType.STEP_FAILED,
+                run,
+                error=result.error,
+            )
+
+            return await self._handle_failure(
+                state=state,
+                run=run,
                 step=step,
-                answer="",
-                reason="final_answer_missing",
+                result=result,
+                context=context,
+            )
+        state.blocked = False
+        state.waiting_for_approval = False
+        state.execution_success = True
+        state.step_succeeded = True
+        state.tool_result = result.output
+        state.tool_error = None
+
+        self.loop_detector.record(
+            step,
+            strategy_family=strategy_family,
+        )
+
+        run.plan_runtime.mark_completed(
+            step_id
+        )
+
+        state.completed_steps = sorted(
+            run.plan_runtime.completed_steps
+        )
+
+        self._emit(
+            EventType.STEP_COMPLETED,
+            run,
+        )
+
+        # Final-answer step is verified before allowing orchestration to complete.
+        if step.is_final_answer:
+            return await self._verify(
+                state,
+                run,
+                step,
+                result,
+                context,
             )
 
-        state.transition(
-            AgentPhase.VERIFYING,
-            reason=(
-                TransitionReason
-                .EXECUTION_COMPLETED
-            ),
+        run.plan_runtime.advance()
+
+        state.current_step = (
+            run.plan_runtime.current_step
         )
 
-        evidence = (
-            runtime.verification_evidence()
+        run.current_attempt = 0
+
+        return OrchestrationOutcome(
+            OrchestrationAction.EXECUTE,
+            result=result,
+            reason="step_completed",
         )
 
-        verification_input = VerificationInput(
-            question=runtime.user_request,
-            candidate_answer=answer,
-            raw_data=evidence,
-            task_type=self._infer_task_type(
-                state
-            ),
-        )
-
-        verification = (
-            await self._verifier.verify(
-                verification_input
+    async def _handle_failure(
+        self,
+        *,
+        state: AgentState,
+        run: OrchestrationContext,
+        step: PlanStep,
+        result: ExecutionResult,
+        context: FinalContext,
+    ) -> OrchestrationOutcome:
+        """Handle execution failures through the reliability engine."""
+        if result.error is None:
+            error = AgentError(
+                error_type="ExecutionFailed",
+                message=(
+                    "Execution failed without "
+                    "an AgentError."
+                ),
+                category=ErrorCategory.EXECUTION_ERROR,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="AgentExecution",
+                operation="execute",
             )
+
+            self._fail(
+                state,
+                error,
+            )
+
+            return OrchestrationOutcome(
+                OrchestrationAction.FAIL,
+                result=result,
+                error=error,
+            )
+
+        decision = await self.reliability.handle_failure(
+            error=result.error,
+            attempt=max(
+                1,
+                run.current_attempt,
+            ),
+            max_attempts=(
+                self.config.max_step_attempts
+            ),
         )
 
-        runtime.record_verification(
-            verified=(
-                verification.status
-                == VerificationStatus.VERIFIED
-            ),
-            result=verification,
-            answer=answer,
+        if (
+            decision.action
+            is ReliabilityAction.RETRY
+        ):
+            self._emit(
+                EventType.RETRY_STARTED,
+                run,
+                metadata={
+                    "attempt": run.current_attempt,
+                    "reason": decision.reason,
+                },
+            )
+
+            return OrchestrationOutcome(
+                OrchestrationAction.RETRY,
+                result=result,
+                error=decision.error,
+                reason=decision.reason,
+            )
+
+        if (
+            decision.action
+            is ReliabilityAction.REPLAN
+        ):
+            return await self._replan(
+                state=state,
+                run=run,
+                failed_step=step,
+                failure=(
+                    decision.error
+                    or result.error
+                ),
+                context=context,
+                reason=decision.reason,
+            )
+
+        failure = (
+            decision.error
+            or result.error
+        )
+
+        self._fail(
+            state,
+            failure,
+        )
+
+        return OrchestrationOutcome(
+            OrchestrationAction.FAIL,
+            result=result,
+            error=failure,
+            reason=decision.reason,
+        )
+
+    async def _replan(
+        self,
+        *,
+        state: AgentState,
+        run: OrchestrationContext,
+        failed_step: PlanStep,
+        failure: AgentError,
+        context: FinalContext,
+        reason: str,
+    ) -> OrchestrationOutcome:
+        """Trigger a replanning cycle due to errors or failed verifications."""
+        if (
+            run.plan_runtime.replan_count
+            >= self.config.max_replans
+        ):
+            self._fail(
+                state,
+                failure,
+            )
+
+            return OrchestrationOutcome(
+                OrchestrationAction.FAIL,
+                error=failure,
+                reason="replan_budget_exhausted",
+            )
+
+        self._emit(
+            EventType.RECOVERY_STARTED,
+            run,
+            metadata={
+                "reason": reason,
+                "replan_count": (
+                    run.plan_runtime.replan_count
+                ),
+            },
+        )
+
+        if state.phase is AgentPhase.EXECUTING:
+            state.transition(
+                AgentPhase.PLANNING,
+                reason=TransitionReason.RECOVERY,
+            )
+
+        elif state.phase is AgentPhase.VERIFYING:
+            state.transition(
+                AgentPhase.PLANNING,
+                reason=(
+                    TransitionReason.VERIFICATION_FAILED
+                ),
+            )
+
+        elif state.phase is AgentPhase.FAILED:
+            state.transition(
+                AgentPhase.PLANNING,
+                reason=TransitionReason.RECOVERY,
+            )
+
+        try:
+            # IMPORTANT: Planner owns replan construction.
+            planning_result = (
+                await self.planner.replan(
+                    user_question=run.user_request,
+                    context=context,
+                    failed_step=failed_step,
+                    failure=failure,
+                )
+            )
+
+            run.plan_runtime.replan_count += 1
+
+            self._install_planning_result(
+                state,
+                run,
+                planning_result,
+            )
+
+            state.replan_count = (
+                run.plan_runtime.replan_count
+            )
+
+            # New plan = new execution attempt.
+            run.current_attempt = 0
+
+        except PlannerRecoveryRequired as exc:
+            error = self._planner_error(
+                exc,
+                operation="replan",
+            )
+
+            self._fail(
+                state,
+                error,
+            )
+
+            self._emit(
+                EventType.PLAN_REJECTED,
+                run,
+                error=error,
+            )
+
+            return OrchestrationOutcome(
+                OrchestrationAction.FAIL,
+                error=error,
+                reason=error.message,
+            )
+
+        self._emit(
+            EventType.PLAN_REPLANNED,
+            run,
+            metadata={
+                "replan_count": (
+                    run.plan_runtime.replan_count
+                ),
+                "steps": len(
+                    run.plan_runtime.plan.steps
+                ),
+                "task_intent": (
+                    run.task_analysis.intent.value
+                    if run.task_analysis
+                    else None
+                ),
+            },
+        )
+
+        self._emit(
+            EventType.RECOVERY_COMPLETED,
+            run,
+        )
+
+        return OrchestrationOutcome(
+            OrchestrationAction.REPLAN,
+            reason=reason,
+        )
+    async def _verify(
+        self,
+        state: AgentState,
+        run: OrchestrationContext,
+        step: PlanStep,
+        result: ExecutionResult,
+        context: FinalContext,
+    ) -> OrchestrationOutcome:
+        """Verify the final answer generated by the agent."""
+        answer = self._extract_answer(
+            result.output
+        )
+
+        if not answer:
+            verification = VerificationResult(
+                status=VerificationStatus.INVALID,
+                reason="Final answer is empty.",
+            )
+        else:
+            state.final_answer = answer
+            state.final_answer_ready = True
+
+            if state.phase is AgentPhase.EXECUTING:
+                state.transition(
+                    AgentPhase.VERIFYING,
+                    reason=(
+                        TransitionReason.EXECUTION_COMPLETED
+                    ),
+                )
+
+            self._emit(
+                EventType.VERIFICATION_STARTED,
+                run,
+            )
+
+            task_analysis = (
+                run.task_analysis
+            )
+
+            if task_analysis is None:
+                error = AgentError(
+                    error_type="MissingTaskAnalysis",
+                    message=(
+                        "Cannot verify final answer "
+                        "without Planner TaskAnalysis."
+                    ),
+                    category=(
+                        ErrorCategory.STATE_TRANSITION_ERROR
+                    ),
+                    severity=ErrorSeverity.CRITICAL,
+                    retryable=False,
+                    recoverable=False,
+                    source="Orchestrator",
+                    operation="verify",
+                )
+
+                self._fail(
+                    state,
+                    error,
+                )
+
+                return OrchestrationOutcome(
+                    OrchestrationAction.FAIL,
+                    result=result,
+                    error=error,
+                    reason=error.message,
+                )
+
+            verification = (
+                await self.verifier.verify(
+                    VerificationInput(
+                        question=run.user_request,
+                        candidate_answer=answer,
+                        raw_data=list(
+                            result.evidence
+                        ),
+                        task_type=(
+                            task_analysis.intent.value
+                        ),
+                    )
+                )
+            )
+
+        run.record_verification(
+            answer,
+            verification,
         )
 
         state.verification_attempts = (
-            runtime.verification_attempts
+            run.verification_attempts
         )
 
-        if (
+        state.final_answer_verified = (
             verification.status
-            == VerificationStatus.VERIFIED
-        ):
+            is VerificationStatus.VERIFIED
+        )
 
-            runtime.final_answer = answer
+        self._emit(
+            EventType.VERIFICATION_COMPLETED,
+            run,
+            metadata={
+                "status": (
+                    verification.status.value
+                ),
+                "task_intent": (
+                    run.task_analysis.intent.value
+                    if run.task_analysis
+                    else None
+                ),
+            },
+        )
 
+        if state.final_answer_verified:
+            run.final_answer = answer
             state.final_answer = answer
             state.final_answer_ready = True
-            state.final_answer_verified = True
+            state.task_completed = True
 
-            state.transition(
-                AgentPhase.COMPLETED,
-                reason=(
-                    TransitionReason
-                    .VERIFICATION_PASSED
-                ),
+            if state.phase is AgentPhase.VERIFYING:
+                state.transition(
+                    AgentPhase.COMPLETED,
+                    reason=(
+                        TransitionReason.VERIFICATION_PASSED
+                    ),
+                )
+
+            self._emit(
+                EventType.AGENT_COMPLETED,
+                run,
             )
 
-            self._increment(
-                "verification_passes"
+            return OrchestrationOutcome(
+                OrchestrationAction.COMPLETE,
+                result=result,
+                verification=verification,
+                reason="answer_verified",
             )
-
-            return result
-
-        self._increment(
-            "verification_failures"
-        )
-
-        return await self._handle_verification_failure(
-            step=step,
-            answer=answer,
-            reason=(
-                verification.reason
-                or verification.status.value
-            ),
-        )
-
-    async def _handle_verification_failure(
-        self,
-        *,
-        step: PlanStep,
-        answer: str,
-        reason: str,
-    ) -> ExecutionResult:
-
-        state = self._require_state()
-        runtime = self._require_context()
 
         if (
-            runtime.verification_attempts
-            >= self._max_verification_attempts
+            run.verification_attempts
+            >= self.config.max_verification_attempts
         ):
-
-            state.final_answer = (
-                answer or None
-            )
-
-            state.final_answer_ready = bool(
-                answer
-            )
-
-            state.final_answer_verified = False
-
-            self._mark_failed(
-                "Answer verification budget exhausted."
-            )
-
-            return ExecutionResult(
-                success=False,
-                output=answer,
-                step_id=step.step_id,
-                metadata={
-                    "verification_failed": True,
-                    "verification_budget_exhausted": True,
-                },
-            )
-
-        state.transition(
-            AgentPhase.PLANNING,
-            reason=(
-                TransitionReason
-                .VERIFICATION_FAILED
-            ),
-        )
-
-        context = await self._build_context()
-
-        try:
-
-            plan = await self._planner.replan(
-                user_question=(
-                    runtime.user_request
+            error = AgentError(
+                error_type="VerificationBudgetExceeded",
+                message=(
+                    "Final answer verification "
+                    "budget exhausted."
                 ),
-                context=context,
-                failed_step=step,
-                failure=reason,
+                category=ErrorCategory.INVALID_RESULT,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="Verifier",
+                operation="verify",
             )
 
-            self._validate_plan(plan)
-
-            runtime.plan_runtime.install_plan(
-                plan
+            self._fail(
+                state,
+                error,
             )
 
-            state.replan_count += 1
-            state.plan = list(
-                plan.steps
-            )
-            state.current_step = 0
-
-            state.transition(
-                AgentPhase.EXECUTING,
+            return OrchestrationOutcome(
+                OrchestrationAction.FAIL,
+                result=result,
+                error=error,
+                verification=verification,
                 reason=(
-                    TransitionReason
-                    .RECOVERY
+                    "verification_budget_exhausted"
                 ),
             )
 
-            return ExecutionResult(
-                success=False,
-                output=answer,
-                step_id=step.step_id,
-                metadata={
-                    "replanned": True,
-                    "verification_replan": True,
-                },
-            )
-
-        except Exception as exc:
-
-            self._mark_failed(
-                str(exc)
-            )
-
-            return ExecutionResult(
-                success=False,
-                output=answer,
-                step_id=step.step_id,
-                error=exc,
-            )
-
-    async def _build_context(
-        self,
-    ) -> FinalContext:
-
-        state = self._require_state()
-
-        request = (
-            ContextRequestBuilder.from_state(
-                state
-            )
+        failure = AgentError(
+            error_type="AnswerVerificationFailed",
+            message=(
+                verification.reason
+                or "Answer verification failed."
+            ),
+            category=ErrorCategory.INVALID_RESULT,
+            severity=ErrorSeverity.MEDIUM,
+            retryable=False,
+            recoverable=True,
+            source="Verifier",
+            operation="verify",
         )
 
-        return await self._context_builder.build(
-            request
+        return await self._replan(
+            state=state,
+            run=run,
+            failed_step=step,
+            failure=failure,
+            context=context,
+            reason=(
+                verification.status.value
+                if verification.status
+                else "verification_failed"
+            ),
         )
 
     @staticmethod
     def _validate_plan(
         plan: PlanSchema,
     ) -> None:
-
-        if not isinstance(
-            plan,
-            PlanSchema,
-        ):
-            raise TypeError(
-                "Planner must return PlanSchema."
-            )
-
+        """Validate structural rules of the generated plan."""
         if not plan.steps:
             raise ValueError(
                 "Planner returned an empty plan."
             )
 
-        final_step = plan.steps[-1]
+        final_steps = [
+            step
+            for step in plan.steps
+            if step.is_final_answer
+        ]
+
+        if len(final_steps) != 1:
+            raise ValueError(
+                "Plan must contain exactly one "
+                "final-answer step."
+            )
+
+        final_step = final_steps[0]
 
         if (
-            not final_step.is_final_answer
-            or final_step.step_type
-            != StepType.LLM
+            final_step.step_id
+            != len(plan.steps) - 1
         ):
             raise ValueError(
-                "Plan must end with a final LLM answer step."
+                "Final-answer step must be "
+                "the last step."
             )
 
-    def _finish_if_possible(
-        self,
-    ) -> ExecutionResult | None:
-
-        runtime = self._require_context()
-
-        if runtime.final_answer is not None:
-            return ExecutionResult(
-                success=True,
-                output=runtime.final_answer,
+        if (
+            final_step.step_type
+            is not StepType.LLM
+        ):
+            raise ValueError(
+                "Final-answer step must be an LLM step."
             )
 
-        return None
-
-    def _mark_failed(
-        self,
-        reason: str,
-    ) -> None:
-
-        state = self._require_state()
-
-        state.fatal_error = True
-
-        if state.phase not in {
-            AgentPhase.FAILED,
-            AgentPhase.COMPLETED,
-            AgentPhase.TERMINATED,
-        }:
-
-            state.transition(
-                AgentPhase.FAILED,
-                reason=(
-                    TransitionReason
-                    .EXECUTION_FAILED
-                ),
-            )
-
-        runtime = self._require_context()
-
-        runtime.terminal_reason = reason
-
-    def _step_attempt_count(
-        self,
-        step_id: int,
-    ) -> int:
-
-        runtime = self._require_context()
-
-        return sum(
-            1
-            for record
-            in runtime.execution_history
-            if record.step_id == step_id
-        )
-
-    @staticmethod
-    def _strategy_key(
-        step: PlanStep,
-    ) -> str:
-
-        if step.tool_name:
-            return (
-                f"tool:{step.tool_name}"
-            )
-
-        return "strategy:llm"
 
     @staticmethod
     def _extract_answer(
-        result: ExecutionResult,
-    ) -> str | None:
+        output: Any,
+    ) -> str:
+        """Extract string answer from tool or step output."""
+        if output is None:
+            return ""
 
-        if result.output is None:
-            return None
+        if isinstance(output, str):
+            return output.strip()
 
-        if isinstance(
-            result.output,
-            str,
-        ):
+        return str(output).strip()
 
-            value = (
-                result.output.strip()
-            )
-
-            return value or None
-
-        return str(
-            result.output
+    @staticmethod
+    def _planner_error(
+        error: Exception,
+        *,
+        operation: str,
+    ) -> AgentError:
+        """Format planner exception into a standard AgentError."""
+        return AgentError(
+            error_type="PlannerRecoveryRequired",
+            message=(
+                str(error)
+                or "Planner recovery required."
+            ),
+            category=ErrorCategory.PLAN_RECOVERY_ERROR,
+            severity=ErrorSeverity.HIGH,
+            retryable=False,
+            recoverable=True,
+            source="Planner",
+            operation=operation,
+            original_exception=error,
         )
 
     @staticmethod
-    def _infer_task_type(
+    def _fail(
         state: AgentState,
-    ) -> str | None:
-
-        value = state.metadata.get(
-            "task_type"
-        )
-
-        if value is None:
-            return None
-
-        return str(value)
-
-    def _sync_state_after_execution(
-        self,
-        step: PlanStep,
-        result: ExecutionResult,
+        error: AgentError | None,
     ) -> None:
-
-        state = self._require_state()
-
-        state.execution_success = (
-            result.success
-        )
-
-        state.step_succeeded = (
-            result.success
-        )
-
-        state.blocked = (
-            result.blocked
-        )
-
-        state.tool_result = (
-            result.output
+        """Update agent state to reflect failure status."""
+        state.fatal_error = bool(
+            error
+            and error.severity
+            is ErrorSeverity.CRITICAL
         )
 
         state.tool_error = (
-            result.error.message
-            if result.error is not None
-            else None
+            error.message
+            if error
+            else "Execution failed."
         )
 
-        if result.evidence:
-            state.evidence.extend(
-                result.evidence
+        if state.phase not in {
+            AgentPhase.COMPLETED,
+            AgentPhase.TERMINATED,
+        }:
+            state.phase = AgentPhase.FAILED
+
+    def _emit(
+        self,
+        event: EventType,
+        run: OrchestrationContext,
+        *,
+        metadata: dict[str, Any] | None = None,
+        error: AgentError | None = None,
+    ) -> None:
+        """Emit observability events if facade is configured."""
+        if self.observability:
+            self.observability.emit(
+                event,
+                run.observability,
+                metadata=metadata,
+                error=(
+                    error.message
+                    if error
+                    else None
+                ),
             )
 
-        if result.artifacts:
-            state.artifacts.extend(
-                result.artifacts
-            )
-
-    def _start_span(
+    def _span(
         self,
         operation: str,
+        context: Any,
     ):
-
-        if self._tracer is None:
-            return None
-
-        return self._tracer.start_span(
-            operation=operation,
-            correlation_id=(
-                self._agent_execution
-                .correlation_id
-            ),
-        )
-
-    def _end_span(
-        self,
-        span,
-    ) -> None:
-
-        if (
-            span is not None
-            and self._tracer is not None
-        ):
-            self._tracer.end_span(
-                span
+        """Create an observability tracing span."""
+        if self.observability:
+            return self.observability.span(
+                operation,
+                context,
             )
 
-    def _increment(
-        self,
-        name: str,
-    ) -> None:
-
-        if self._metrics is not None:
-            self._metrics.increment(
-                name
-            )
-
-    def _require_state(
-        self,
-    ) -> AgentState:
-
-        if self._state is None:
-            raise RuntimeError(
-                "Orchestrator is not bound."
-            )
-
-        return self._state
-
-    def _require_context(
-        self,
-    ) -> OrchestrationContext:
-
-        if self._context is None:
-            raise RuntimeError(
-                "Orchestrator is not bound."
-            )
-
-        return self._context
-
-    def emit_agent_started(self) -> None:
-
-        if self._event_logger is None:
-            return
-
-        runtime = self._require_context()
-
-        self._event_logger.log(
-            create_event(
-                event_type=(
-                    EventType.AGENT_STARTED
-                ),
-                correlation_id=(
-                    self._agent_execution
-                    .correlation_id
-                ),
-                metadata={
-                    "run_id": runtime.run_id
-                },
-            )
-        )
-
-    def emit_agent_completed(self) -> None:
-
-        if self._event_logger is None:
-            return
-
-        runtime = self._require_context()
-
-        self._event_logger.log(
-            create_event(
-                event_type=(
-                    EventType.AGENT_COMPLETED
-                ),
-                correlation_id=(
-                    self._agent_execution
-                    .correlation_id
-                ),
-                metadata={
-                    "run_id": runtime.run_id,
-                    "final_answer": (
-                        runtime.final_answer
-                    ),
-                },
-            )
-        )
-
-    def _handle_loop(
-        self,
-        step: PlanStep,
-    ) -> ExecutionResult:
-
-        self._mark_failed(
-            f"Execution loop detected at step "
-            f"{step.step_id}."
-        )
-
-        return ExecutionResult(
-            success=False,
-            step_id=step.step_id,
-            error=RuntimeError(
-                f"Execution loop detected at step "
-                f"{step.step_id}."
-            ),
-        )
+        return nullcontext()
