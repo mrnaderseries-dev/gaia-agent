@@ -290,7 +290,27 @@ class AgentState:
         )
 
     def complete(self) -> StateTransition:
-        self.final_answer_verified = True
+        """Transition to COMPLETED only after verification has passed.
+
+        Completion is a lifecycle fact, not a convenience flag.  The
+        caller must establish the verification gate before invoking this
+        method.
+        """
+        if not self.final_answer_verified:
+            raise AgentError(
+                error_type="CompletionWithoutVerification",
+                message=(
+                    "Agent cannot transition to COMPLETED before "
+                    "the final answer is verified."
+                ),
+                category=ErrorCategory.STATE_TRANSITION_ERROR,
+                severity=ErrorSeverity.CRITICAL,
+                retryable=False,
+                recoverable=False,
+                source="AgentState",
+                operation="complete",
+            )
+
         self.task_completed = True
 
         return self.transition(
@@ -304,8 +324,10 @@ class AgentState:
         reason: TransitionReason = (
             TransitionReason.EXECUTION_FAILED
         ),
+        fatal: bool = True,
     ) -> StateTransition:
-        self.fatal_error = True
+        """Enter FAILED through the canonical state transition API."""
+        self.fatal_error = fatal
 
         return self.transition(
             AgentPhase.FAILED,

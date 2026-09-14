@@ -42,6 +42,9 @@ class ToolResultRecord:
     artifacts: list[ArtifactInfo] = field(default_factory=list)
     evidence_type: str = "unknown"
     source: str | None = None
+    run_id: str | None = None
+    attempt_id: str | None = None
+    plan_version: int | None = None
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )

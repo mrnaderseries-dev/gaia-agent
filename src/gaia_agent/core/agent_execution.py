@@ -942,6 +942,10 @@ class AgentExecution:
             }
         if not evidence:
 
+            run_id = request.metadata.get("run_id")
+
+            attempt = request.metadata.get("attempt")
+
             evidence = (
                 ToolResultRecord(
                     step_id=request.step_id,
@@ -954,6 +958,21 @@ class AgentExecution:
                     succeeded=True,
                     evidence_type="tool_output",
                     source=request.tool_name,
+                    run_id=(
+                        str(run_id)
+                        if run_id is not None
+                        else None
+                    ),
+                    attempt_id=(
+                        str(attempt)
+                        if attempt is not None
+                        else None
+                    ),
+                    plan_version=(
+                        request.metadata.get(
+                            "plan_version"
+                        )
+                    ),
                 ),
             )
 

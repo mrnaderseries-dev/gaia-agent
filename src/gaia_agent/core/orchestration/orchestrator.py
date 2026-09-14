@@ -194,7 +194,7 @@ class Orchestrator:
             )
 
         except Exception as exc:
-            error_name = type(exc).name
+            error_name = type(exc).__name__
 
             error = AgentError(
                 error_type=error_name,
@@ -337,6 +337,22 @@ class Orchestrator:
 
         self._validate_plan(plan)
 
+        if state.phase is not AgentPhase.PLANNING:
+            raise AgentError(
+                error_type="PlanInstalledOutsidePlanning",
+                message=(
+                    "A plan may only be installed while the agent is "
+                    "in PLANNING phase; current phase is "
+                    f"{state.phase.value}."
+                ),
+                category=ErrorCategory.STATE_TRANSITION_ERROR,
+                severity=ErrorSeverity.CRITICAL,
+                retryable=False,
+                recoverable=False,
+                source="Orchestrator",
+                operation="install_plan",
+            )
+
         state.plan = list(plan.steps)
         state.current_step = (
             run.plan_runtime.current_step
@@ -426,6 +442,15 @@ class Orchestrator:
             )
 
         run.current_attempt += 1
+
+        # Per-attempt state is a projection, not historical truth.
+        # Clear stale success/error flags before every new attempt so a
+        # retry cannot inherit the previous attempt's outcome.
+        state.execution_success = False
+        state.step_succeeded = False
+        state.tool_error = None
+        state.blocked = False
+        state.waiting_for_approval = False
 
         request = ExecutionRequest(
             step_id=step_id,
@@ -709,6 +734,28 @@ class Orchestrator:
             state.transition(
                 AgentPhase.PLANNING,
                 reason=TransitionReason.RECOVERY,
+            )
+
+        else:
+            error = AgentError(
+                error_type="InvalidReplanLifecycle",
+                message=(
+                    "Replanning is only valid from EXECUTING, "
+                    "VERIFYING, or FAILED; current phase is "
+                    f"{state.phase.value}."
+                ),
+                category=ErrorCategory.STATE_TRANSITION_ERROR,
+                severity=ErrorSeverity.CRITICAL,
+                retryable=False,
+                recoverable=False,
+                source="Orchestrator",
+                operation="replan",
+            )
+            self._fail(state, error)
+            return OrchestrationOutcome(
+                action=OrchestrationAction.FAIL,
+                error=error,
+                reason=error.message,
             )
 
         try:
@@ -1048,8 +1095,14 @@ class Orchestrator:
         if state.phase not in {
             AgentPhase.COMPLETED,
             AgentPhase.TERMINATED,
+            AgentPhase.FAILED,
         }:
-            state.phase = AgentPhase.FAILED
+            # AgentState is the sole owner of lifecycle transitions.
+            # Never mutate state.phase directly from orchestration.
+            state.fail(
+                reason=TransitionReason.EXECUTION_FAILED,
+                fatal=state.fatal_error,
+            )
 
     def _emit(
         self,

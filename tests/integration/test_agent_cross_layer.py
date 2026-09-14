@@ -19,7 +19,12 @@ from gaia_agent.context.ContextBuilder import (
 )
 from gaia_agent.context.attachments import Attachment
 from gaia_agent.core.agent_state import AgentState
-from gaia_agent.core.orchestration.orchestrator import Orchestrator
+from gaia_agent.core.orchestration.orchestrator import (
+    Orchestrator,
+    OrchestratorConfig,
+)
+from gaia_agent.observability.facade import ObservabilityFacade
+from gaia_agent.reliability.loop_detector import LoopDetection
 from gaia_agent.core.agent_execution import AgentExecution
 from gaia_agent.llm.model import LLMModel
 from gaia_agent.planner.planner import Planner
@@ -216,7 +221,7 @@ def integration_system():
     )
 
     loop_detector = MagicMock()
-    loop_detector.check.return_value = False
+    loop_detector.check.return_value = LoopDetection(detected=False)
 
     verifier = VerifierAgent(
         client=MagicMock(),
@@ -230,11 +235,11 @@ def integration_system():
         reliability_engine=reliability_engine,
         loop_detector=loop_detector,
         verifier=verifier,
-        event_logger=MagicMock(),
-        metrics=MagicMock(),
-        tracer=MagicMock(),
-        max_execution_attempts=3,
-        max_verification_attempts=2,
+        observability=MagicMock(spec=ObservabilityFacade),
+        config=OrchestratorConfig(
+            max_step_attempts=3,
+            max_verification_attempts=2,
+        ),
     )
 
     return SimpleNamespace(
@@ -385,12 +390,12 @@ async def test_agent_execution_is_wired_into_orchestrator(
 
     orchestrator.bind_state(integration_state)
 
-    assert orchestrator._agent_execution is integration_system.agent_execution
+    assert orchestrator.agent_execution is integration_system.agent_execution
 
     context = await orchestrator._build_context()
 
     assert context.items
-    assert orchestrator._agent_execution is not None
+    assert orchestrator.agent_execution is not None
 
     orchestrator.unbind()
 
@@ -406,7 +411,7 @@ async def test_verifier_is_wired_into_orchestrator(
 ):
     orchestrator = integration_system.orchestrator
 
-    assert orchestrator._verifier is integration_system.verifier
+    assert orchestrator.verifier is integration_system.verifier
 
 
 # ============================================================================
@@ -447,7 +452,7 @@ async def test_reliability_is_wired_into_orchestrator(
 ):
     orchestrator = integration_system.orchestrator
 
-    assert orchestrator._reliability is integration_system.reliability_engine
+    assert orchestrator.reliability is integration_system.reliability_engine
 
 
 # ============================================================================
@@ -463,9 +468,14 @@ async def test_loop_detector_is_wired_into_orchestrator(
 
     assert orchestrator._loop_detector is integration_system.loop_detector
 
-    integration_system.loop_detector.check.return_value = False
+    integration_system.loop_detector.check.return_value = LoopDetection(
+        detected=False,
+    )
 
-    assert orchestrator._loop_detector.check.return_value is False
+    assert (
+        orchestrator._loop_detector.check.return_value.detected
+        is False
+    )
 
 
 # ============================================================================
@@ -478,9 +488,9 @@ def test_complete_orchestration_graph_is_wired(
 ):
     orchestrator = integration_system.orchestrator
 
-    assert orchestrator._context_builder is integration_system.context_builder
-    assert orchestrator._planner is integration_system.planner
-    assert orchestrator._agent_execution is integration_system.agent_execution
-    assert orchestrator._reliability is integration_system.reliability_engine
-    assert orchestrator._loop_detector is integration_system.loop_detector
-    assert orchestrator._verifier is integration_system.verifier
+    assert orchestrator.context_builder is integration_system.context_builder
+    assert orchestrator.planner is integration_system.planner
+    assert orchestrator.agent_execution is integration_system.agent_execution
+    assert orchestrator.reliability is integration_system.reliability_engine
+    assert orchestrator.loop_detector is integration_system.loop_detector
+    assert orchestrator.verifier is integration_system.verifier

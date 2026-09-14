@@ -512,3 +512,94 @@ def test_verifier_prompt_requires_question_specific_support():
     assert "unrelated web-search" in prompt
     assert "specific source" in prompt
     assert "verified=false" in prompt
+
+
+# ============================================================================
+# Evidence provenance
+# ============================================================================
+
+
+def stamped_evidence(
+    *,
+    result_text,
+    run_id,
+    plan_version,
+    attempt_id,
+    succeeded=True,
+):
+    return SimpleNamespace(
+        tool_name="python_interpreter",
+        result=result_text,
+        succeeded=succeeded,
+        run_id=run_id,
+        attempt_id=attempt_id,
+        plan_version=plan_version,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_plan_evidence_cannot_verify_current_answer():
+    client = AsyncMock()
+    verifier = VerifierAgent(
+        client=client,
+        model="test-model",
+    )
+
+    data = VerificationInput(
+        question="What is the answer?",
+        candidate_answer="42",
+        raw_data=[
+            stamped_evidence(
+                result_text="The calculated result is 999.",
+                run_id="run-1",
+                plan_version=1,
+                attempt_id="1",
+            ),
+            stamped_evidence(
+                result_text="The calculated result is 42.",
+                run_id="run-1",
+                plan_version=2,
+                attempt_id="2",
+            ),
+        ],
+        task_type="self_contained",
+    )
+
+    result = await verifier.verify(data)
+
+    assert result.status is VerificationStatus.VERIFIED
+    assert client.generate.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_evidence_from_other_run_cannot_verify_current_answer():
+    client = AsyncMock()
+    verifier = VerifierAgent(
+        client=client,
+        model="test-model",
+    )
+
+    data = VerificationInput(
+        question="What is the answer?",
+        candidate_answer="42",
+        raw_data=[
+            stamped_evidence(
+                result_text="The calculated result is 999.",
+                run_id="run-1",
+                plan_version=1,
+                attempt_id="1",
+            ),
+            stamped_evidence(
+                result_text="The calculated result is 42.",
+                run_id="run-2",
+                plan_version=1,
+                attempt_id="1",
+            ),
+        ],
+        task_type="self_contained",
+    )
+
+    result = await verifier.verify(data)
+
+    assert result.status is VerificationStatus.VERIFIED
+    assert client.generate.await_count == 0

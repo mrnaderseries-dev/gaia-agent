@@ -63,7 +63,7 @@ class AgentLoop:
         return self._state
 
     @property
-    def run(self) -> OrchestrationContext | None:
+    def run_context(self) -> OrchestrationContext | None:
         return self._run
 
     async def run_agent(
@@ -204,45 +204,31 @@ class AgentLoop:
         state: AgentState,
         run: OrchestrationContext,
     ) -> None:
+        """Apply the final orchestration projection.
+
+        The Orchestrator normally transitions the state to COMPLETED when
+        verification passes.  AgentLoop only reconciles the projection and
+        safely handles callers/tests that return COMPLETE immediately after
+        verification without duplicating lifecycle ownership.
+        """
         if run.final_answer is not None:
-            state.final_answer = (
-                run.final_answer
-            )
+            state.final_answer = run.final_answer
 
-        state.final_answer_ready = (
-            run.final_answer is not None
-        )
-
-        state.final_answer_verified = (
-            run.is_verified
-        )
-
-        state.verification_attempts = (
-            run.verification_attempts
-        )
+        state.final_answer_ready = run.final_answer is not None
+        state.final_answer_verified = run.is_verified
+        state.verification_attempts = run.verification_attempts
 
         if not run.is_verified:
             raise RuntimeError(
-                "Orchestrator returned COMPLETE "
-                "without a verified final answer."
+                "Orchestrator returned COMPLETE without a verified final answer."
             )
 
         if state.phase is AgentPhase.COMPLETED:
+            state.task_completed = True
             return
 
         if state.phase is AgentPhase.TERMINATED:
-            raise RuntimeError(
-                "Cannot complete a terminated agent."
-            )
-
-        if not state.can_transition_to(
-            AgentPhase.COMPLETED
-        ):
-            raise RuntimeError(
-                "Invalid lifecycle transition to "
-                "COMPLETED from "
-                f"{state.phase.value}."
-            )
+            raise RuntimeError("Cannot complete a terminated agent.")
 
         state.complete()
 
@@ -273,7 +259,10 @@ class AgentLoop:
         if state.can_transition_to(
             AgentPhase.FAILED
         ):
-            state.fail()
+            state.fail(
+                reason=TransitionReason.EXECUTION_FAILED,
+                fatal=state.fatal_error,
+            )
 
     @staticmethod
     def _terminate(

@@ -66,6 +66,7 @@ from gaia_agent.core.llm_executor import (
 )
 from gaia_agent.core.orchestration.orchestrator import (
     Orchestrator,
+    OrchestratorConfig,
 )
 from gaia_agent.core.policies.approval import (
     ApprovalPolicy,
@@ -93,6 +94,9 @@ from gaia_agent.llm.provider.ollama import (
 )
 from gaia_agent.llm.service import (
     LLMService,
+)
+from gaia_agent.observability.facade import (
+    ObservabilityFacade,
 )
 from gaia_agent.observability.logger import (
     EventLogger,
@@ -265,9 +269,6 @@ async def create_agent() -> AgentLoop:
 
     loop_detector = LoopDetector(
         max_history=50,
-        max_sequence_length=10,
-        exact_repetition_threshold=3,
-        sequence_repetition_threshold=3,
     )
 
     planner = Planner(
@@ -291,7 +292,7 @@ async def create_agent() -> AgentLoop:
 
     recovery_policy = (
         RecoveryPolicy(
-            allow_replan=True,
+            allow_replanning=True,
         )
     )
 
@@ -315,7 +316,6 @@ async def create_agent() -> AgentLoop:
     llm_executor = LLMExecutor(
         client=llm_client,
         model=TEXT_MODEL,
-        context_builder=context_builder,
     )
 
     agent_execution = AgentExecution(
@@ -337,6 +337,12 @@ async def create_agent() -> AgentLoop:
         model=TEXT_MODEL,
     )
 
+    observability = ObservabilityFacade(
+        event_logger=event_logger,
+        tracer=tracer,
+        metrics=metrics,
+    )
+
     orchestrator = Orchestrator(
         context_builder=context_builder,
         planner=planner,
@@ -344,11 +350,11 @@ async def create_agent() -> AgentLoop:
         reliability_engine=reliability_engine,
         loop_detector=loop_detector,
         verifier=verifier,
-        event_logger=event_logger,
-        metrics=metrics,
-        tracer=tracer,
-        max_execution_attempts=3,
-        max_verification_attempts=2,
+        observability=observability,
+        config=OrchestratorConfig(
+            max_step_attempts=3,
+            max_verification_attempts=2,
+        ),
     )
 
     return AgentLoop(

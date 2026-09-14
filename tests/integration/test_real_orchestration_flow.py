@@ -33,6 +33,10 @@ from gaia_agent.reliability.errors import (
 from gaia_agent.reliability.failure_classifier import (
     FailureClassification,
 )
+from gaia_agent.reliability.loop_detector import (
+    LoopDetection,
+    LoopType,
+)
 from gaia_agent.reliability.policies.recovery_policy import (
     RecoveryAction,
 )
@@ -373,7 +377,7 @@ def _make_orchestrator(
     if context_builder is None:
         context_builder = _make_context_builder()
     loop_detector = MagicMock()
-    loop_detector.check.return_value = False
+    loop_detector.check.return_value = LoopDetection(detected=False)
 
     return Orchestrator(
         context_builder=context_builder,
@@ -400,6 +404,28 @@ def _make_verifier(
     )
 
     return verifier
+
+
+def _capture_run_context(
+    orchestrator,
+) -> dict:
+    """Capture the OrchestrationContext created during a run.
+
+    AgentLoop clears its bound run context in cleanup, so tests
+    that need the run history capture it at start().
+    """
+    captured = {}
+
+    original_start = orchestrator.start
+
+    async def capture(state, *, run=None):
+        context = await original_start(state, run=run)
+        captured["run"] = context
+        return context
+
+    orchestrator.start = capture
+
+    return captured
 
 
 
@@ -532,15 +558,15 @@ async def test_real_tool_execution_produces_evidence_for_verification():
 
     evidence = verification_input.raw_data[0]
 
-    assert evidence["tool_name"] == "test_tool"
+    assert evidence.tool_name == "test_tool"
 
-    assert evidence["result"] == {
+    assert evidence.result == {
         "answer": 42,
         "source": "integration-tool",
     }
 
-    assert evidence["succeeded"] is True
-    assert evidence["step_id"] == 0
+    assert evidence.succeeded is True
+    assert evidence.step_id == 0
 
     assert llm_executor.execute.await_count == 1
 
@@ -596,6 +622,8 @@ async def test_real_agent_execution_failure_retries_through_reliability():
         termination_policy=_make_termination_policy(),
     )
 
+    captured = _capture_run_context(orchestrator)
+
     state = _make_state()
 
     result = await loop.run(
@@ -607,7 +635,7 @@ async def test_real_agent_execution_failure_retries_through_reliability():
 
     assert llm_executor.execute.await_count == 2
 
-    history = orchestrator._context.execution_history
+    history = captured["run"].execution_history
 
     assert len(history) == 2
 
@@ -759,6 +787,8 @@ async def test_verification_failure_replans_and_then_completes():
         termination_policy=_make_termination_policy(),
     )
 
+    captured = _capture_run_context(orchestrator)
+
     state = _make_state(
         "Answer and verify this question.",
     )
@@ -775,7 +805,7 @@ async def test_verification_failure_replans_and_then_completes():
     assert planner.replan.await_count == 1
     assert llm_executor.execute.await_count == 2
 
-    history = orchestrator._context.verification_history
+    history = captured["run"].verification_history
 
     assert len(history) == 2
 
@@ -838,6 +868,8 @@ async def test_verification_budget_exhaustion_fails_agent():
         termination_policy=_make_termination_policy(),
     )
 
+    captured = _capture_run_context(orchestrator)
+
     state = _make_state()
 
     result = await loop.run(
@@ -853,7 +885,7 @@ async def test_verification_budget_exhaustion_fails_agent():
     assert verifier.verify.await_count == 2
     assert llm_executor.execute.await_count == 2
 
-    assert len(orchestrator._context.verification_history) == 2
+    assert len(captured["run"].verification_history) == 2
 
 
 
@@ -882,7 +914,12 @@ async def test_loop_detection_stops_orchestration():
 
     loop_detector = MagicMock()
 
-    loop_detector.check.return_value = True
+    loop_detector.check.return_value = LoopDetection(
+        detected=True,
+        loop_type=LoopType.EXACT,
+        similarity=1.0,
+        reason="integration loop detected",
+    )
 
     orchestrator = Orchestrator(
         context_builder=context_builder,
@@ -1004,12 +1041,20 @@ async def test_invalid_plan_is_rejected_before_execution():
         verifier=verifier,
     )
 
+    loop = AgentLoop(
+        orchestrator=orchestrator,
+        termination_policy=_make_termination_policy(),
+    )
+
     state = _make_state()
 
-    with pytest.raises(Exception):
-        await orchestrator.start(
-            state,
-        )
+    result = await loop.run(
+        state,
+    )
+
+    assert result is state
+    assert result.phase == AgentPhase.FAILED
+    assert result.fatal_error is True
 
     assert llm_executor.execute.await_count == 0
 
@@ -1056,6 +1101,8 @@ async def test_verification_evidence_preserves_execution_metadata():
         termination_policy=_make_termination_policy(),
     )
 
+    captured = _capture_run_context(orchestrator)
+
     state = _make_state()
 
     result = await loop.run(
@@ -1070,16 +1117,14 @@ async def test_verification_evidence_preserves_execution_metadata():
 
     evidence = verification_input.raw_data[0]
 
-    assert evidence["tool_name"] == "test_tool"
-    assert evidence["result"] == "42"
-    assert evidence["step_id"] == 0
-    assert evidence["succeeded"] is True
-    assert evidence["relevant"] is True
+    assert evidence.tool_name == "test_tool"
+    assert evidence.result == "42"
+    assert evidence.step_id == 0
+    assert evidence.succeeded is True
 
-    assert "run_id" in evidence
-    assert "plan_version" in evidence
-    assert "attempt_id" in evidence
-    assert evidence["step_status"] == "completed"
+    assert evidence.run_id == str(captured["run"].run_id)
+    assert evidence.plan_version == 1
+    assert evidence.attempt_id == "1"
 
 
 
