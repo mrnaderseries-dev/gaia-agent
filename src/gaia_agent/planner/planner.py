@@ -1876,7 +1876,6 @@ Return only a valid PlanSchema.
                 "import math\n"
                 f"result = math.factorial({ratio[0]}) "
                 f"// math.factorial({ratio[1]})\n"
-                "print(result)"
             )
 
         expression = detect_simple_operation(
@@ -1886,7 +1885,6 @@ Return only a valid PlanSchema.
         if expression:
             return (
                 f"result = {expression}\n"
-                "print(result)"
             )
 
         return None

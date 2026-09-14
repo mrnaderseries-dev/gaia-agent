@@ -1,11 +1,13 @@
-
-
-
 from __future__ import annotations
 
 import asyncio
 import sys
 from uuid import uuid4
+
+
+# ============================================================================
+# STDOUT / STDERR UTF-8
+# ============================================================================
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(
@@ -19,132 +21,73 @@ if hasattr(sys.stderr, "reconfigure"):
         errors="replace",
     )
 
-from gaia_agent.agents.answer_sanitizer import (
-    AnswerSanitizer,
-)
-from gaia_agent.agents.verifier import (
-    VerifierAgent,
-)
-from gaia_agent.context.ContextBuilder import (
-    ContextBuilder,
-)
-from gaia_agent.context.ContextBudget import (
-    ContextBudget,
-)
-from gaia_agent.context.ContextCompressor import (
-    ContextCompressor,
-)
-from gaia_agent.context.ContextPolicy import (
-    ContextPolicy,
-)
-from gaia_agent.context.ContextValidator import (
-    ContextValidator,
-)
-from gaia_agent.context.sources.attachments import (
-    AttachmentSource,
-)
-from gaia_agent.context.sources.conversation import (
-    ConversationSource,
-)
-from gaia_agent.context.sources.history import (
-    HistorySource,
-)
-from gaia_agent.context.sources.runtime import (
-    RuntimeSource,
-)
-from gaia_agent.core.agent_execution import (
-    AgentExecution,
-)
-from gaia_agent.core.agent_loop import (
-    AgentLoop,
-)
-from gaia_agent.core.agent_state import (
-    AgentState,
-)
-from gaia_agent.core.llm_executor import (
-    LLMExecutor,
-)
+
+# ============================================================================
+# AGENT COMPONENTS
+# ============================================================================
+
+from gaia_agent.agents.verifier import VerifierAgent
+
+from gaia_agent.context.ContextBuilder import ContextBuilder
+from gaia_agent.context.ContextBudget import ContextBudget
+from gaia_agent.context.ContextCompressor import ContextCompressor
+from gaia_agent.context.ContextPolicy import ContextPolicy
+from gaia_agent.context.ContextValidator import ContextValidator
+
+from gaia_agent.context.sources.attachments import AttachmentSource
+from gaia_agent.context.sources.conversation import ConversationSource
+from gaia_agent.context.sources.history import HistorySource
+from gaia_agent.context.sources.runtime import RuntimeSource
+
+from gaia_agent.core.agent_execution import AgentExecution
+from gaia_agent.core.agent_loop import AgentLoop
+from gaia_agent.core.agent_state import AgentState
+from gaia_agent.core.llm_executor import LLMExecutor
+
 from gaia_agent.core.orchestration.orchestrator import (
     Orchestrator,
     OrchestratorConfig,
 )
-from gaia_agent.core.policies.approval import (
-    ApprovalPolicy,
-)
-from gaia_agent.core.policies.execution import (
-    ExecutionPolicy,
-)
-from gaia_agent.core.policies.termination import (
-    TerminationPolicy,
-)
-from gaia_agent.core.risk.analyzer import (
-    RiskAnalyzer,
-)
-from gaia_agent.core.risk.assessor import (
-    RiskAssessor,
-)
-from gaia_agent.core.risk.rules import (
-    RiskRules,
-)
-from gaia_agent.llm.model import (
-    LLMModel,
-)
-from gaia_agent.llm.provider.ollama import (
-    OllamaClient,
-)
-from gaia_agent.llm.service import (
-    LLMService,
-)
-from gaia_agent.observability.facade import (
-    ObservabilityFacade,
-)
-from gaia_agent.observability.logger import (
-    EventLogger,
-)
-from gaia_agent.observability.metrics import (
-    Metrics,
-)
-from gaia_agent.observability.token_tracker import (
-    TokenTracker,
-)
-from gaia_agent.observability.tracer import (
-    Tracer,
-)
-from gaia_agent.planner.planner import (
-    Planner,
-)
-from gaia_agent.reliability.engine import (
-    ReliabilityEngine,
-)
-from gaia_agent.reliability.error_handler import (
-    ErrorHandler,
-)
-from gaia_agent.reliability.failure_classifier import (
-    FailureClassifier,
-)
-from gaia_agent.reliability.loop_detector import (
-    LoopDetector,
-)
-from gaia_agent.reliability.policies.recovery_policy import (
-    RecoveryPolicy,
-)
-from gaia_agent.reliability.policies.retry_policy import (
-    RetryPolicy,
-)
-from gaia_agent.reliability.recovery import (
-    Recovery,
-)
-from gaia_agent.reliability.retry import (
-    Retry,
-)
-from gaia_agent.tools.registry import (
-    ToolRegistry,
-)
+
+from gaia_agent.core.policies.approval import ApprovalPolicy
+from gaia_agent.core.policies.execution import ExecutionPolicy
+from gaia_agent.core.policies.termination import TerminationPolicy
+
+from gaia_agent.core.risk.analyzer import RiskAnalyzer
+from gaia_agent.core.risk.assessor import RiskAssessor
+from gaia_agent.core.risk.rules import RiskRules
+
+from gaia_agent.llm.model import LLMModel
+from gaia_agent.llm.provider.ollama import OllamaClient
+from gaia_agent.llm.service import LLMService
+
+from gaia_agent.observability.facade import ObservabilityFacade
+from gaia_agent.observability.logger import EventLogger
+from gaia_agent.observability.metrics import Metrics
+from gaia_agent.observability.token_tracker import TokenTracker
+from gaia_agent.observability.tracer import Tracer
+
+from gaia_agent.planner.planner import Planner
+
+from gaia_agent.reliability.engine import ReliabilityEngine
+from gaia_agent.reliability.error_handler import ErrorHandler
+from gaia_agent.reliability.failure_classifier import FailureClassifier
+from gaia_agent.reliability.loop_detector import LoopDetector
+
+from gaia_agent.reliability.policies.recovery_policy import RecoveryPolicy
+from gaia_agent.reliability.policies.retry_policy import RetryPolicy
+
+from gaia_agent.reliability.recovery import Recovery
+from gaia_agent.reliability.retry import Retry
+
+from gaia_agent.tools.registry import ToolRegistry
 
 
-OLLAMA_BASE_URL = (
-    "http://localhost:11434"
-)
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+OLLAMA_BASE_URL = "http://localhost:11434"
 
 TEXT_MODEL = LLMModel(
     provider="ollama",
@@ -161,17 +104,41 @@ VISION_MODEL = LLMModel(
 )
 
 
+# ============================================================================
+# AGENT FACTORY
+# ============================================================================
+
+
 async def create_agent() -> AgentLoop:
+    """
+    Composition root.
+
+    This function owns dependency construction and wiring.
+
+    Runtime responsibilities stay inside their dedicated layers.
+    """
+
+    # ========================================================================
+    # OBSERVABILITY
+    # ========================================================================
 
     event_logger = EventLogger()
     metrics = Metrics()
     tracer = Tracer()
     token_tracker = TokenTracker()
 
+    # ========================================================================
+    # OLLAMA CLIENT
+    # ========================================================================
+
     llm_client = OllamaClient(
         base_url=OLLAMA_BASE_URL,
         token_tracker=token_tracker,
     )
+
+    # ========================================================================
+    # LLM SERVICES
+    # ========================================================================
 
     text_llm_service = LLMService(
         client=llm_client,
@@ -182,6 +149,10 @@ async def create_agent() -> AgentLoop:
         client=llm_client,
         model=VISION_MODEL,
     )
+
+    # ========================================================================
+    # TOOL REGISTRY
+    # ========================================================================
 
     tool_registry = ToolRegistry(
         base_dir=".",
@@ -195,16 +166,21 @@ async def create_agent() -> AgentLoop:
 
     available_tools = {
         spec.name: spec
-        for spec
-        in tool_registry.get_tool_specs()
+        for spec in tool_registry.get_tool_specs()
     }
 
-    execution_policy = (
-        ExecutionPolicy()
-    )
+    # ========================================================================
+    # EXECUTION POLICY
+    # ========================================================================
+
+    execution_policy = ExecutionPolicy()
+
+    # ========================================================================
+    # RISK
+    # ========================================================================
 
     risk_rules = RiskRules(
-        tool_registry=tool_registry
+        tool_registry=tool_registry,
     )
 
     risk_analyzer = RiskAnalyzer(
@@ -217,16 +193,24 @@ async def create_agent() -> AgentLoop:
         analyzer=risk_analyzer,
     )
 
-    approval_policy = (
-        ApprovalPolicy()
+    # ========================================================================
+    # APPROVAL
+    # ========================================================================
+
+    approval_policy = ApprovalPolicy()
+
+    # ========================================================================
+    # TERMINATION POLICY
+    # ========================================================================
+
+    termination_policy = TerminationPolicy(
+        max_iterations=20,
+        max_verification_attempts=2,
     )
 
-    termination_policy = (
-        TerminationPolicy(
-            max_iterations=20,
-            max_verification_attempts=2,
-        )
-    )
+    # ========================================================================
+    # CONTEXT
+    # ========================================================================
 
     context_policy = ContextPolicy(
         include_memory=False,
@@ -240,19 +224,15 @@ async def create_agent() -> AgentLoop:
         max_tokens=8000,
     )
 
-    context_validator = (
-        ContextValidator(
-            budget=context_budget,
-        )
+    context_validator = ContextValidator(
+        budget=context_budget,
     )
 
-    context_compressor = (
-        ContextCompressor(
-            client=llm_client,
-            model=TEXT_MODEL,
-            budget=context_budget,
-            policy=context_policy,
-        )
+    context_compressor = ContextCompressor(
+        client=llm_client,
+        model=TEXT_MODEL,
+        budget=context_budget,
+        policy=context_policy,
     )
 
     context_builder = ContextBuilder(
@@ -267,9 +247,17 @@ async def create_agent() -> AgentLoop:
         runtime_source=RuntimeSource(),
     )
 
+    # ========================================================================
+    # LOOP DETECTOR
+    # ========================================================================
+
     loop_detector = LoopDetector(
         max_history=50,
     )
+
+    # ========================================================================
+    # PLANNER
+    # ========================================================================
 
     planner = Planner(
         client=llm_client,
@@ -278,11 +266,13 @@ async def create_agent() -> AgentLoop:
         loop_detector=loop_detector,
     )
 
+    # ========================================================================
+    # RELIABILITY
+    # ========================================================================
+
     error_handler = ErrorHandler()
 
-    failure_classifier = (
-        FailureClassifier()
-    )
+    failure_classifier = FailureClassifier()
 
     retry_policy = RetryPolicy(
         max_attempts=3,
@@ -290,33 +280,37 @@ async def create_agent() -> AgentLoop:
         max_delay=30.0,
     )
 
-    recovery_policy = (
-        RecoveryPolicy(
-            allow_replanning=True,
-        )
+    recovery_policy = RecoveryPolicy(
+        allow_replanning=True,
     )
 
     retry = Retry()
 
     recovery = Recovery(
-        error_handler=error_handler
+        error_handler=error_handler,
     )
 
-    reliability_engine = (
-        ReliabilityEngine(
-            error_handler=error_handler,
-            failure_classifier=failure_classifier,
-            retry_policy=retry_policy,
-            recovery_policy=recovery_policy,
-            retry=retry,
-            recovery=recovery,
-        )
+    reliability_engine = ReliabilityEngine(
+        error_handler=error_handler,
+        failure_classifier=failure_classifier,
+        retry_policy=retry_policy,
+        recovery_policy=recovery_policy,
+        retry=retry,
+        recovery=recovery,
     )
+
+    # ========================================================================
+    # LLM EXECUTOR
+    # ========================================================================
 
     llm_executor = LLMExecutor(
         client=llm_client,
         model=TEXT_MODEL,
     )
+
+    # ========================================================================
+    # AGENT EXECUTION
+    # ========================================================================
 
     agent_execution = AgentExecution(
         tool_registry=tool_registry,
@@ -332,16 +326,28 @@ async def create_agent() -> AgentLoop:
         correlation_id=uuid4(),
     )
 
+    # ========================================================================
+    # VERIFIER
+    # ========================================================================
+
     verifier = VerifierAgent(
         client=llm_client,
         model=TEXT_MODEL,
     )
+
+    # ========================================================================
+    # OBSERVABILITY FACADE
+    # ========================================================================
 
     observability = ObservabilityFacade(
         event_logger=event_logger,
         tracer=tracer,
         metrics=metrics,
     )
+
+    # ========================================================================
+    # ORCHESTRATOR
+    # ========================================================================
 
     orchestrator = Orchestrator(
         context_builder=context_builder,
@@ -354,8 +360,13 @@ async def create_agent() -> AgentLoop:
         config=OrchestratorConfig(
             max_step_attempts=3,
             max_verification_attempts=2,
+            max_replans=3,
         ),
     )
+
+    # ========================================================================
+    # AGENT LOOP
+    # ========================================================================
 
     return AgentLoop(
         orchestrator=orchestrator,
@@ -363,50 +374,299 @@ async def create_agent() -> AgentLoop:
     )
 
 
-async def main() -> None:
+# ============================================================================
+# DIAGNOSTIC HELPERS
+# ============================================================================
 
-    agent = await create_agent()
 
-    state = AgentState(
-        user_request=(
-            "Search the web and tell me "
-            "the current population of France."
+def print_transition_history(state: AgentState) -> None:
+    print()
+    print("=" * 70)
+    print("TRANSITION HISTORY")
+    print("=" * 70)
+
+    if not state.transition_history:
+        print("No transitions recorded.")
+        return
+
+    for index, transition in enumerate(
+        state.transition_history,
+        start=1,
+    ):
+        print(
+            f"{index:02d}. "
+            f"{transition.from_phase} -> "
+            f"{transition.to_phase} | "
+            f"reason={transition.reason}"
         )
-    )
 
-    result = await agent.run(
-        state
-    )
 
-    print(
-        "\n=============================="
-    )
+def print_execution_history(state: AgentState) -> None:
+    print()
+    print("=" * 70)
+    print("EXECUTION HISTORY")
+    print("=" * 70)
+
+    if not state.execution_results:
+        print("No execution results recorded.")
+        return
+
+    for index, execution in enumerate(
+        state.execution_results,
+        start=1,
+    ):
+        print()
+        print(f"Execution #{index}")
+        print(f"  success:   {execution.success}")
+        print(f"  step_id:   {execution.step_id}")
+        print(f"  tool_name: {execution.tool_name}")
+        print(f"  output:    {execution.output}")
+        print(f"  blocked:   {execution.blocked}")
+        print(f"  error:     {execution.error}")
+
+
+def print_evidence(state: AgentState) -> None:
+    print()
+    print("=" * 70)
+    print("EVIDENCE")
+    print("=" * 70)
+
+    if not state.evidence:
+        print("No evidence recorded.")
+        return
+
+    for index, evidence in enumerate(
+        state.evidence,
+        start=1,
+    ):
+        print(f"{index:02d}. {evidence}")
+
+
+def print_artifacts(state: AgentState) -> None:
+    print()
+    print("=" * 70)
+    print("ARTIFACTS")
+    print("=" * 70)
+
+    if not state.artifacts:
+        print("No artifacts recorded.")
+        return
+
+    for index, artifact in enumerate(
+        state.artifacts,
+        start=1,
+    ):
+        print(f"{index:02d}. {artifact}")
+
+
+def print_final_report(state: AgentState) -> None:
+    print()
+    print("=" * 70)
+    print("GAIA AGENT FINAL REPORT")
+    print("=" * 70)
+
+    print()
     print("FINAL ANSWER")
-    print("==============================")
+    print("-" * 70)
+    print(repr(state.final_answer))
 
-    print(
-        result.final_answer
-    )
-
-    print(
-        "\n=============================="
-    )
+    print()
     print("PHASE")
-    print("==============================")
+    print("-" * 70)
+    print(state.phase)
 
-    print(
-        result.phase
-    )
+    print()
+    print("TASK COMPLETED")
+    print("-" * 70)
+    print(state.task_completed)
 
-    print(
-        "\n=============================="
-    )
-    print("TERMINATION")
-    print("==============================")
+    print()
+    print("FINAL ANSWER READY")
+    print("-" * 70)
+    print(state.final_answer_ready)
 
-    print(
-        result.termination_reason
-    )
+    print()
+    print("FINAL ANSWER VERIFIED")
+    print("-" * 70)
+    print(state.final_answer_verified)
+
+    print()
+    print("FATAL ERROR")
+    print("-" * 70)
+    print(state.fatal_error)
+
+    print()
+    print("TOOL ERROR")
+    print("-" * 70)
+    print(repr(state.tool_error))
+
+    print()
+    print("CURRENT STEP")
+    print("-" * 70)
+    print(state.current_step)
+
+    print()
+    print("CURRENT ACTION")
+    print("-" * 70)
+    print(repr(state.current_action))
+
+    print()
+    print("STEP TYPE")
+    print("-" * 70)
+    print(state.step_type)
+
+    print()
+    print("TOOL NAME")
+    print("-" * 70)
+    print(state.tool_name)
+
+    print()
+    print("TOOL ARGUMENTS")
+    print("-" * 70)
+    print(repr(state.tool_arguments))
+
+    print()
+    print("TOOL RESULT")
+    print("-" * 70)
+    print(repr(state.tool_result))
+
+    print()
+    print("EXECUTION SUCCESS")
+    print("-" * 70)
+    print(state.execution_success)
+
+    print()
+    print("STEP SUCCEEDED")
+    print("-" * 70)
+    print(state.step_succeeded)
+
+    print()
+    print("BLOCKED")
+    print("-" * 70)
+    print(state.blocked)
+
+    print()
+    print("WAITING FOR APPROVAL")
+    print("-" * 70)
+    print(state.waiting_for_approval)
+
+    print()
+    print("REPLAN COUNT")
+    print("-" * 70)
+    print(state.replan_count)
+
+    print()
+    print("RETRY COUNT")
+    print("-" * 70)
+    print(state.retry_count)
+
+    print()
+    print("SAME FAILURE COUNT")
+    print("-" * 70)
+    print(state.same_failure_count)
+
+    print()
+    print("SAME PLAN COUNT")
+    print("-" * 70)
+    print(state.same_plan_count)
+
+    print()
+    print("ITERATION")
+    print("-" * 70)
+    print(state.iteration)
+
+    print()
+    print("VERIFICATION ATTEMPTS")
+    print("-" * 70)
+    print(state.verification_attempts)
+
+    print()
+    print("TERMINATION REASON")
+    print("-" * 70)
+    print(state.termination_reason)
+
+    print_transition_history(state)
+    print_execution_history(state)
+    print_evidence(state)
+    print_artifacts(state)
+
+    print()
+    print("=" * 70)
+    print("END OF REPORT")
+    print("=" * 70)
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+
+async def main(
+    user_request: str = "Calculate 2 + 2.",
+) -> AgentState:
+    """
+    Real application entrypoint.
+
+    Default request is deliberately simple so that the first real smoke
+    test validates local Ollama + Planner + AgentExecution + Tool + LLM +
+    Verification without depending on external web services.
+    """
+
+    print()
+    print("=" * 70)
+    print("STARTING GAIA AGENT")
+    print("=" * 70)
+
+    print()
+    print("REQUEST")
+    print("-" * 70)
+    print(user_request)
+
+    print()
+    print("OLLAMA")
+    print("-" * 70)
+    print(OLLAMA_BASE_URL)
+
+    print()
+    print("TEXT MODEL")
+    print("-" * 70)
+    print(TEXT_MODEL.model)
+
+    try:
+        agent = await create_agent()
+
+        state = AgentState(
+            user_request=user_request,
+        )
+
+        result = await agent.run(state)
+
+        print_final_report(result)
+
+        return result
+
+    except Exception as exc:
+        print()
+        print("=" * 70)
+        print("UNHANDLED APPLICATION EXCEPTION")
+        print("=" * 70)
+
+        print()
+        print("TYPE")
+        print("-" * 70)
+        print(type(exc).__name__)
+
+        print()
+        print("MESSAGE")
+        print("-" * 70)
+        print(str(exc))
+
+        raise
+
+
+# ============================================================================
+# SCRIPT ENTRYPOINT
+# ============================================================================
 
 
 if __name__ == "__main__":

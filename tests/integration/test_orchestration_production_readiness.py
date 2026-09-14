@@ -130,12 +130,12 @@ def test_orchestration_production_lifecycle_preserves_invariants() -> None:
     assert state.task_completed is False
 
     # ---------------------------------------------------------
-    # 6. Recovery must start from an explicit lifecycle transition
+    # 6. Recovery uses an explicit lifecycle transition (FAILED -> PLANNING)
     # ---------------------------------------------------------
 
-    state.start_recovery()
+    state.recover()
 
-    assert state.phase is AgentPhase.RECOVERING
+    assert state.phase is AgentPhase.PLANNING
 
     # ---------------------------------------------------------
     # 7. Replanning creates a new plan version
@@ -207,6 +207,5 @@ def test_orchestration_production_lifecycle_preserves_invariants() -> None:
     ]
 
     assert AgentPhase.FAILED in phases
-    assert AgentPhase.RECOVERING in phases
     assert AgentPhase.VERIFYING in phases
     assert phases[-1] is AgentPhase.COMPLETED  # zabet indent

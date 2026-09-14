@@ -18,7 +18,8 @@ from gaia_agent.context.ContextBuilder import (
     RuntimeSource,
 )
 from gaia_agent.context.attachments import Attachment
-from gaia_agent.core.agent_state import AgentState
+from gaia_agent.core.agent_state import AgentPhase, AgentState
+from gaia_agent.core.orchestration.models import OrchestrationAction
 from gaia_agent.core.orchestration.orchestrator import (
     Orchestrator,
     OrchestratorConfig,
@@ -271,23 +272,18 @@ def integration_state():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_binds_state_and_creates_runtime_context(
+async def test_orchestrator_start_creates_runtime_context(
     integration_system,
     integration_state,
 ):
     orchestrator = integration_system.orchestrator
 
-    orchestrator.bind_state(integration_state)
+    run = await orchestrator.start(integration_state)
 
-    assert orchestrator._state is integration_state
-    assert orchestrator._context is not None
-    assert orchestrator._context.user_request == integration_state.user_request
-    assert orchestrator._context.run_id
+    assert run.user_request == integration_state.user_request
+    assert run.run_id
+    assert integration_state.phase is AgentPhase.PLANNING
 
-    orchestrator.unbind()
-
-    assert orchestrator._state is None
-    assert orchestrator._context is None
 
 
 @pytest.mark.asyncio
@@ -295,17 +291,18 @@ async def test_orchestrator_builds_context_before_planning(
     integration_system,
     integration_state,
 ):
+    from gaia_agent.context.request_builder import ContextRequestBuilder
+
     orchestrator = integration_system.orchestrator
 
-    orchestrator.bind_state(integration_state)
+    request = ContextRequestBuilder.from_state(integration_state)
 
-    context = await orchestrator._build_context()
+    context = await orchestrator.context_builder.build(request)
 
     assert context is not None
     assert context.items
     assert context.items[0] == integration_state.attachments[0]
 
-    orchestrator.unbind()
 
 
 def test_context_request_crosses_state_to_context_boundary(
@@ -336,16 +333,18 @@ async def test_planner_is_called_with_user_request_and_context(
     integration_system,
     integration_state,
 ):
+    from gaia_agent.context.request_builder import ContextRequestBuilder
+    from gaia_agent.planner.models import PlanningResult
+    from gaia_agent.planner.plan_schema import PlanSchema, PlanStep, StepType
+
     orchestrator = integration_system.orchestrator
 
-    orchestrator.bind_state(integration_state)
-
-    expected_plan = SimpleNamespace(
+    expected_plan = PlanSchema(
         steps=[
-            SimpleNamespace(
-                step_id=1,
+            PlanStep(
+                step_id=0,
                 action="produce final answer",
-                step_type="llm",
+                step_type=StepType.LLM,
                 tool_name=None,
                 arguments={},
                 is_final_answer=True,
@@ -353,27 +352,35 @@ async def test_planner_is_called_with_user_request_and_context(
         ]
     )
 
-    integration_system.planner.generate_plan = AsyncMock(
-        return_value=expected_plan
+    task_analysis = integration_system.planner.task_classifier.classify(
+        integration_state.user_request
     )
 
-    # The real orchestrator validates PlanSchema, so this test intentionally
-    # checks the boundary only by invoking the context-building/planner call
-    # directly through the planner mock contract.
-    context = await orchestrator._build_context()
+    integration_system.planner.generate_plan = AsyncMock(
+        return_value=PlanningResult(
+            plan=expected_plan,
+            task_analysis=task_analysis,
+        )
+    )
 
-    await integration_system.planner.generate_plan(
-        integration_state.user_request,
-        context,
+    request = ContextRequestBuilder.from_state(integration_state)
+
+    context = await orchestrator.context_builder.build(request)
+
+    result = await integration_system.planner.generate_plan(
+        user_question=integration_state.user_request,
+        context=context,
     )
 
     integration_system.planner.generate_plan.assert_awaited_once()
 
     call = integration_system.planner.generate_plan.await_args
 
-    assert call.args[0] == integration_state.user_request
-    assert call.args[1] is context
+    assert call.kwargs["user_question"] == integration_state.user_request
+    assert call.kwargs["context"] is context
     assert context.items
+    assert result.plan is expected_plan
+
 
 
 # ============================================================================
@@ -386,18 +393,19 @@ async def test_agent_execution_is_wired_into_orchestrator(
     integration_system,
     integration_state,
 ):
-    orchestrator = integration_system.orchestrator
+    from gaia_agent.context.request_builder import ContextRequestBuilder
 
-    orchestrator.bind_state(integration_state)
+    orchestrator = integration_system.orchestrator
 
     assert orchestrator.agent_execution is integration_system.agent_execution
 
-    context = await orchestrator._build_context()
+    request = ContextRequestBuilder.from_state(integration_state)
+
+    context = await orchestrator.context_builder.build(request)
 
     assert context.items
     assert orchestrator.agent_execution is not None
 
-    orchestrator.unbind()
 
 
 # ============================================================================
@@ -420,25 +428,33 @@ async def test_verifier_is_wired_into_orchestrator(
 
 
 @pytest.mark.asyncio
-async def test_terminal_iteration_is_idempotent(
+async def test_terminal_step_is_idempotent(
     integration_system,
     integration_state,
 ):
-    from gaia_agent.core.agent_state import AgentPhase
+    from gaia_agent.core.agent_state import AgentPhase, TransitionReason
 
     orchestrator = integration_system.orchestrator
 
-    orchestrator.bind_state(integration_state)
+    run = await orchestrator.start(integration_state)
 
-    integration_state.phase = AgentPhase.COMPLETED
+    integration_state.transition(
+        AgentPhase.EXECUTING,
+        reason=TransitionReason.PLAN_READY,
+    )
+    integration_state.transition(
+        AgentPhase.VERIFYING,
+        reason=TransitionReason.EXECUTION_COMPLETED,
+    )
+    integration_state.final_answer_verified = True
+    integration_state.complete()
 
-    first = await orchestrator.run_iteration()
-    second = await orchestrator.run_iteration()
+    first = await orchestrator.step(integration_state, run)
+    second = await orchestrator.step(integration_state, run)
 
-    assert first is None
-    assert second is None
+    assert first.action is OrchestrationAction.TERMINATE
+    assert second.action is OrchestrationAction.TERMINATE
 
-    orchestrator.unbind()
 
 
 # ============================================================================
@@ -464,16 +480,24 @@ async def test_reliability_is_wired_into_orchestrator(
 async def test_loop_detector_is_wired_into_orchestrator(
     integration_system,
 ):
+    from gaia_agent.planner.plan_schema import PlanStep, StepType
+
     orchestrator = integration_system.orchestrator
 
-    assert orchestrator._loop_detector is integration_system.loop_detector
+    assert orchestrator.loop_detector is integration_system.loop_detector
 
-    integration_system.loop_detector.check.return_value = LoopDetection(
-        detected=False,
+    step = PlanStep(
+        step_id=0,
+        action="integration probe",
+        step_type=StepType.TOOL,
+        tool_name="python",
+        arguments={"code": "1 + 1"},
     )
 
     assert (
-        orchestrator._loop_detector.check.return_value.detected
+        orchestrator.loop_detector.check(
+            step, strategy_family="PYTHON"
+        ).detected
         is False
     )
 

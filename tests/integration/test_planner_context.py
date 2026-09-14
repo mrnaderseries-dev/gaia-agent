@@ -11,6 +11,7 @@ from gaia_agent.context.ContextCompressor import ContextCompressor
 from gaia_agent.context.ContextPolicy import ContextPolicy
 from gaia_agent.context.ContextValidator import ContextValidator
 
+from gaia_agent.context.sources.attachments import AttachmentSource
 from gaia_agent.context.sources.conversation import (
     ConversationContext,
     ConversationSource,
@@ -67,19 +68,20 @@ class FakeMemorySource(MemorySource):
 
 @pytest.mark.asyncio
 async def test_planner_works_with_context_builder():
+    from gaia_agent.context.models import ContextRequest
+    from gaia_agent.conversation.models import MessageRole
 
     state = AgentState(
         user_request="Explain the current task using the available context.",
-        user_id="test-user",
     )
 
-    state.messages = [
+    messages = [
         Message(
-            role="user",
+            role=MessageRole.USER,
             content="We are testing the planner with context.",
         ),
         Message(
-            role="assistant",
+            role=MessageRole.ASSISTANT,
             content="The context builder should provide this message.",
         ),
     ]
@@ -87,6 +89,17 @@ async def test_planner_works_with_context_builder():
     state.current_step = 1
     state.completed_steps = [0]
     state.current_action = "Process the user request."
+    state.iteration = 1
+
+    request = ContextRequest(
+        user_request=state.user_request,
+        conversation=messages,
+        plan=list(state.plan),
+        current_step=state.current_step,
+        completed_steps=list(state.completed_steps),
+        current_action=state.current_action,
+        iteration=state.iteration,
+    )
 
     policy = ContextPolicy(
         include_memory=False,
@@ -124,13 +137,14 @@ async def test_planner_works_with_context_builder():
         budget=budget,
         validator=validator,
         compressor=compressor,
+        attachment_source=AttachmentSource(),
         conversation_source=ConversationSource(),
         history_source=HistorySource(),
         memory_source=FakeMemorySource(),
         runtime_source=RuntimeSource(),
     )
 
-    final_context = await context_builder.build(state)
+    final_context = await context_builder.build(request)
 
     assert final_context.items
     assert final_context.token_count <= budget.max_tokens
@@ -153,12 +167,12 @@ async def test_planner_works_with_context_builder():
 
     plan = await planner.generate_plan(
         user_question=state.user_request,
-        context=final_context.items,
+        context=final_context,
     )
 
-    assert isinstance(plan, PlanSchema)
-    assert plan.steps
+    assert isinstance(plan.plan, PlanSchema)
+    assert plan.plan.steps
 
-    assert plan.steps[0].step_id == 0
-    assert plan.steps[0].step_type == StepType.LLM
-    assert plan.steps[0].tool_name is None
+    assert plan.plan.steps[0].step_id == 0
+    assert plan.plan.steps[0].step_type == StepType.LLM
+    assert plan.plan.steps[0].tool_name is None

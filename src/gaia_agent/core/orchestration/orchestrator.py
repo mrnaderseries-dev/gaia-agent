@@ -265,17 +265,69 @@ class Orchestrator:
                 run.user_request,
                 context,
             )
+        except PlannerRecoveryRequired as exc:
+            error = self._planner_error(
+                exc,
+                operation="generate_plan",
+            )
 
+            self._fail(
+                state,
+                error,
+            )
+
+            self._emit(
+                EventType.PLAN_REJECTED,
+                run,
+                error=error,
+            )
+
+            return OrchestrationOutcome(
+                action=OrchestrationAction.FAIL,
+                error=error,
+                reason=error.message,
+            )
+
+        try:
             self._install_planning_result(
                 state,
                 run,
                 planning_result,
             )
-
         except PlannerRecoveryRequired as exc:
             error = self._planner_error(
                 exc,
                 operation="generate_plan",
+            )
+
+            self._fail(
+                state,
+                error,
+            )
+
+            self._emit(
+                EventType.PLAN_REJECTED,
+                run,
+                error=error,
+            )
+
+            return OrchestrationOutcome(
+                action=OrchestrationAction.FAIL,
+                error=error,
+                reason=error.message,
+            )
+
+        except (TypeError, ValueError) as exc:
+            error = AgentError(
+                error_type="InvalidPlan",
+                message=str(exc) or "Planner returned an invalid plan.",
+                category=ErrorCategory.PLAN_RECOVERY_ERROR,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="Orchestrator",
+                operation="generate_plan",
+                original_exception=exc,
             )
 
             self._fail(
@@ -324,18 +376,48 @@ class Orchestrator:
         run: OrchestrationContext,
         planning_result: Any,
     ) -> None:
+        # Atomic install: validate the candidate BEFORE mutating
+        # OrchestrationContext / PlanRuntime. An invalid plan must never
+        # become the active plan (no version bump, no reset, no clearing).
+        #
+        # The Planner may return either:
+        # - PlanSchema directly (from create_plan / generate_plan)
+        # - PlanningResult dataclass (with .plan and .task_analysis)
+        #
+        # Normalize to a PlanSchema for validation.
+        if isinstance(planning_result, PlanSchema):
+            candidate = planning_result
+            task_analysis = getattr(planning_result, "task_analysis", None)
+            # If PlanSchema has a task_analysis attribute, use it; otherwise we'll
+            # try to derive one from the planner's current state.
+            if task_analysis is None:
+                task_analysis = getattr(
+                    self.planner, "_last_analysis", None
+                )
+        else:
+            candidate = getattr(planning_result, "plan", None)
+
+            if candidate is None:
+                raise ValueError(
+                    "Planner returned no plan."
+                )
+
+            if not isinstance(candidate, PlanSchema):
+                raise TypeError(
+                    "Planning result must contain a PlanSchema."
+                )
+
+            task_analysis = getattr(
+                planning_result, "task_analysis", None
+            )
+
+        self._validate_plan(candidate)
+
         run.install_planning_result(
             planning_result
         )
 
         plan = run.plan_runtime.plan
-
-        if plan is None:
-            raise ValueError(
-                "Planner returned no plan."
-            )
-
-        self._validate_plan(plan)
 
         if state.phase is not AgentPhase.PLANNING:
             raise AgentError(
@@ -765,21 +847,6 @@ class Orchestrator:
                 failed_step=failed_step,
                 failure=failure,
             )
-
-            run.plan_runtime.replan_count += 1
-
-            self._install_planning_result(
-                state,
-                run,
-                planning_result,
-            )
-
-            state.replan_count = (
-                run.plan_runtime.replan_count
-            )
-
-            run.current_attempt = 0
-
         except PlannerRecoveryRequired as exc:
             error = self._planner_error(
                 exc,
@@ -802,6 +869,76 @@ class Orchestrator:
                 error=error,
                 reason=error.message,
             )
+
+        # Validate + install. replan_count is incremented ONLY after a
+        # valid replacement plan has successfully been installed, so an
+        # invalid replan leaves counters and the prior plan untouched.
+        try:
+            self._install_planning_result(
+                state,
+                run,
+                planning_result,
+            )
+        except PlannerRecoveryRequired as exc:
+            error = self._planner_error(
+                exc,
+                operation="replan",
+            )
+
+            self._fail(
+                state,
+                error,
+            )
+
+            self._emit(
+                EventType.PLAN_REJECTED,
+                run,
+                error=error,
+            )
+
+            return OrchestrationOutcome(
+                action=OrchestrationAction.FAIL,
+                error=error,
+                reason=error.message,
+            )
+
+        except (TypeError, ValueError) as exc:
+            error = AgentError(
+                error_type="InvalidReplannedPlan",
+                message=str(exc) or "Replanned plan is invalid.",
+                category=ErrorCategory.PLAN_RECOVERY_ERROR,
+                severity=ErrorSeverity.HIGH,
+                retryable=False,
+                recoverable=False,
+                source="Orchestrator",
+                operation="replan",
+                original_exception=exc,
+            )
+
+            self._fail(
+                state,
+                error,
+            )
+
+            self._emit(
+                EventType.PLAN_REJECTED,
+                run,
+                error=error,
+            )
+
+            return OrchestrationOutcome(
+                action=OrchestrationAction.FAIL,
+                error=error,
+                reason=error.message,
+            )
+
+        run.plan_runtime.replan_count += 1
+
+        state.replan_count = (
+            run.plan_runtime.replan_count
+        )
+
+        run.current_attempt = 0
 
         self._emit(
             EventType.PLAN_REPLANNED,
@@ -1001,6 +1138,10 @@ class Orchestrator:
             source="Verifier",
             operation="verify",
         )
+
+        state.final_answer = None
+        state.final_answer_ready = False
+        run.final_answer = None
 
         return await self._replan(
             state,

@@ -3,6 +3,7 @@
 from gaia_agent.core.agent_state import (
     AgentPhase,
     AgentState,
+    TransitionReason,
 )
 from gaia_agent.core.orchestration.models import (
     OrchestrationAction,
@@ -20,31 +21,6 @@ from gaia_agent.core.policies.termination import (
 
 
 class AgentLoop:
-    """
-    Top-level lifecycle driver for the agent.
-
-    AgentLoop is intentionally thin.
-
-    It owns:
-        - binding the AgentState
-        - starting the orchestration run
-        - repeatedly asking the Orchestrator for one step
-        - asking the TerminationPolicy whether execution may continue
-        - stopping on terminal / approval / termination conditions
-
-    It does NOT own:
-        - planning
-        - task classification
-        - strategy selection
-        - tool execution
-        - retry
-        - recovery
-        - replanning
-        - verification
-        - evidence handling
-
-    Those responsibilities belong to the corresponding layers.
-    """
 
     def __init__(
         self,
@@ -75,9 +51,7 @@ class AgentLoop:
         self._state = state
 
         try:
-            run = await self.orchestrator.start(
-                state
-            )
+            run = await self.orchestrator.start(state)
 
             self._run = run
 
@@ -124,39 +98,21 @@ class AgentLoop:
 
         termination_state = TerminationState(
             iteration=state.iteration,
-            final_answer_ready=(
-                state.final_answer_ready
-            ),
-            final_answer_verified=(
-                state.final_answer_verified
-            ),
-            fatal_error=(
-                state.fatal_error
-            ),
-            human_aborted=(
-                state.human_aborted
-            ),
-            explicit_stop=(
-                state.explicit_stop
-            ),
-            timed_out=(
-                state.timed_out
-            ),
-            verification_attempts=(
-                state.verification_attempts
-            ),
+            final_answer_ready=state.final_answer_ready,
+            final_answer_verified=state.final_answer_verified,
+            fatal_error=state.fatal_error,
+            human_aborted=state.human_aborted,
+            explicit_stop=state.explicit_stop,
+            timed_out=state.timed_out,
+            verification_attempts=state.verification_attempts,
         )
 
-        decision = (
-            self.termination_policy.evaluate(
-                termination_state
-            )
+        decision = self.termination_policy.evaluate(
+            termination_state
         )
 
         if decision.should_stop:
-            state.termination_reason = (
-                decision.reason
-            )
+            state.termination_reason = decision.reason
 
         return decision
 
@@ -189,10 +145,7 @@ class AgentLoop:
             )
             return True
 
-        if (
-            action
-            is OrchestrationAction.WAIT_FOR_APPROVAL
-        ):
+        if action is OrchestrationAction.WAIT_FOR_APPROVAL:
             state.waiting_for_approval = True
             state.blocked = True
             return True
@@ -204,23 +157,25 @@ class AgentLoop:
         state: AgentState,
         run: OrchestrationContext,
     ) -> None:
-        """Apply the final orchestration projection.
-
-        The Orchestrator normally transitions the state to COMPLETED when
-        verification passes.  AgentLoop only reconciles the projection and
-        safely handles callers/tests that return COMPLETE immediately after
-        verification without duplicating lifecycle ownership.
-        """
         if run.final_answer is not None:
             state.final_answer = run.final_answer
 
-        state.final_answer_ready = run.final_answer is not None
-        state.final_answer_verified = run.is_verified
-        state.verification_attempts = run.verification_attempts
+        state.final_answer_ready = (
+            run.final_answer is not None
+        )
+
+        state.final_answer_verified = (
+            run.is_verified
+        )
+
+        state.verification_attempts = (
+            run.verification_attempts
+        )
 
         if not run.is_verified:
             raise RuntimeError(
-                "Orchestrator returned COMPLETE without a verified final answer."
+                "Orchestrator returned COMPLETE without "
+                "a verified final answer."
             )
 
         if state.phase is AgentPhase.COMPLETED:
@@ -228,7 +183,9 @@ class AgentLoop:
             return
 
         if state.phase is AgentPhase.TERMINATED:
-            raise RuntimeError("Cannot complete a terminated agent.")
+            raise RuntimeError(
+                "Cannot complete a terminated agent."
+            )
 
         state.complete()
 
@@ -250,11 +207,8 @@ class AgentLoop:
             state.tool_error = str(
                 outcome.error
             )
-
         elif outcome.reason:
-            state.tool_error = (
-                outcome.reason
-            )
+            state.tool_error = outcome.reason
 
         if state.can_transition_to(
             AgentPhase.FAILED
@@ -276,33 +230,35 @@ class AgentLoop:
         if state.phase is AgentPhase.COMPLETED:
             return
 
-        if reason is not None:
-            state.termination_reason = reason
-
-        if state.can_transition_to(
+        if not state.can_transition_to(
             AgentPhase.TERMINATED
         ):
-            state.terminate()
+            return
+
+        state.terminate()
+
+        if reason is not None:
+            state.termination_reason = reason
 
     @staticmethod
     def _terminate_from_policy(
         state: AgentState,
         decision: TerminationDecision,
     ) -> None:
-        state.termination_reason = (
-            decision.reason
-        )
-
         if state.phase in {
             AgentPhase.COMPLETED,
             AgentPhase.TERMINATED,
         }:
             return
 
-        if state.can_transition_to(
+        if not state.can_transition_to(
             AgentPhase.TERMINATED
         ):
-            state.terminate()
+            return
+
+        state.terminate()
+
+        state.termination_reason = decision.reason
 
     @staticmethod
     def _validate_state(
