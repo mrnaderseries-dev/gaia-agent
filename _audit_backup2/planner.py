@@ -1644,13 +1644,16 @@ Return only a valid PlanSchema.
         items = getattr(context, "items", None) or []
 
         for item in items:
-            candidate = getattr(item, "path", None)
-            if (
-                isinstance(candidate, str)
-                and candidate.strip()
-                and candidate not in merged
+            for candidate in (
+                getattr(item, "path", None),
+                getattr(item, "filename", None),
             ):
-                merged.append(candidate)
+                if (
+                    isinstance(candidate, str)
+                    and candidate.strip()
+                    and candidate not in merged
+                ):
+                    merged.append(candidate)
 
         self.available_files = merged
 

@@ -1,0 +1,94 @@
+Saved working directory and index state On main: audit_fixes
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   src/gaia_agent/agents/verifier.py
+	modified:   src/gaia_agent/planner/planner.py
+	modified:   src/gaia_agent/reliability/loop_detector.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	_audit_agentstate_fields.txt
+	_audit_attach.txt
+	_audit_backup/
+	_audit_backup2/
+	_audit_batch1_err.txt
+	_audit_batch1_out.txt
+	_audit_batch1_snapshot.txt
+	_audit_data/
+	_audit_driver.py
+	_audit_envcheck.py
+	_audit_envcheck_out.txt
+	_audit_evaldir.txt
+	_audit_evaldir2.txt
+	_audit_gitdiff.txt
+	_audit_gitdiffhead.txt
+	_audit_gitdiffstat.txt
+	_audit_gitdiffstat_restored.txt
+	_audit_gitlog.txt
+	_audit_gitstatus.txt
+	_audit_grep1.txt
+	_audit_grep2.txt
+	_audit_harness.py
+	_audit_head_maxver.txt
+	_audit_loop_lines.txt
+	_audit_makeimage.py
+	_audit_makeimage.txt
+	_audit_multirun.py
+	_audit_ollama.txt
+	_audit_ollamalist.txt
+	_audit_orch_lines.txt
+	_audit_procs.txt
+	_audit_pytest_baseline.txt
+	_audit_pytest_contract.txt
+	_audit_pytest_contract_err.txt
+	_audit_pytest_head.txt
+	_audit_pytest_postfix.txt
+	_audit_registry.txt
+	_audit_res_A.txt
+	_audit_res_A_err.txt
+	_audit_res_B_reverse_text.json
+	_audit_res_C_multinumber.json
+	_audit_res_D_conflicting.json
+	_audit_res_E2_insufficient.json
+	_audit_res_E_insufficient.json
+	_audit_res_F_file_missing.json
+	_audit_res_G_python_error.json
+	_audit_res_H_web.json
+	_audit_res_I_file.json
+	_audit_res_J_vision.json
+	_audit_res_K_multihop.json
+	_audit_reset.txt
+	_audit_run_default_err.txt
+	_audit_run_default_out.txt
+	_audit_specs.py
+	_audit_specs_out.txt
+	_audit_srcfiles.txt
+	_audit_stash.txt
+	_audit_tasks.json
+	_audit_testfiles.txt
+	_audit_tooldefs.txt
+	_audit_verify_sig.txt
+	src/cert_probe.py
+	src/gaia_agent/analysis.md
+	src/gaia_agent/main_run_1.txt
+	src/gaia_agent/main_run_2.txt
+	src/gaia_agent/main_run_3.txt
+	src/gaia_agent/main_run_4_err.txt
+	src/gaia_agent/main_run_4_out.txt
+	src/gaia_agent/rt_2plus2.txt
+	src/gaia_agent/rt_decoded.txt
+	src/gaia_agent/rt_now.txt
+	src/gaia_agent/run_new_2plus2.txt
+	src/gaia_agent/run_verify.txt
+	src/gaia_agent/runtime_A.txt
+	src/gaia_agent/runtime_B.err
+	src/gaia_agent/runtime_B.txt
+	src/gaia_agent/runtime_final.txt
+	src/gaia_agent/runtime_fresh.txt
+
+no changes added to commit (use "git add" and/or "git commit -a")
+Dropped refs/stash@{0} (1e96ca56c4703a88e657f4ef956878d0341d407d)

@@ -1,0 +1,15 @@
+tool_count: 7
+{"name": "file_reader", "description": "Read local text, markdown, CSV, JSON, or configuration files securely and handle multi-format file evaluation tasks.", "parameters": [], "risk": "None"}
+{"name": "transcribe_audio", "description": "Transcribe a local audio file into text using a local speech-to-text model. Supports WAV, MP3, M4A, FLAC, OGG, WEBM, AAC", "parameters": [], "risk": "None"}
+{"name": "analyze_image", "description": "Analyze an image, chart, chess board, or diagram and answer a question using only the visual information contained in th", "parameters": [], "risk": "None"}
+{"name": "analyze_excel", "description": "Analyze an Excel workbook or tabular spreadsheet according to a user's question. Supports XLSX, XLSM, CSV and TSV files.", "parameters": [], "risk": "None"}
+{"name": "python_interpreter", "description": "Execute Python code safely to perform complex calculations, data processing, string manipulation, or data analysis for G", "parameters": [], "risk": "None"}
+{"name": "web_search", "description": "Performs a duckduckgo web search based on your query (think a Google search) then returns the top search results.", "parameters": [], "risk": "None"}
+{"name": "visit_webpage", "description": "Visits a webpage at the given url and reads its content as a markdown string. Use this to browse webpages.", "parameters": [], "risk": "None"}
+resolve web_search -> None
+resolve read_file -> None
+resolve python_interpreter -> None
+resolve vision_analysis -> None
+resolve analyze_image -> None
+resolve read_spreadsheet -> None
+resolve transcribe_audio -> None

@@ -225,8 +225,7 @@ class Planner:
         self.model = model
         self.loop_detector = loop_detector or LoopDetector()
         self.base_dir = base_dir
-        self._configured_files = list(available_files or [])
-        self.available_files = list(self._configured_files)
+        self.available_files = list(available_files or [])
         self.task_classifier = TaskClassifier()
         self.strategy_selector = StrategySelector()
         self.semantic_validator = SemanticPlanValidator()
@@ -244,8 +243,6 @@ class Planner:
         """
         self._validate_question(user_question)
         self._current_question = user_question
-
-        self._sync_available_files(context)
 
         analysis = self._classify(user_question)
 
@@ -393,8 +390,6 @@ class Planner:
             raise ValueError("failure cannot be None.")
 
         self._current_question = user_question
-
-        self._sync_available_files(context)
 
         analysis = self._classify(user_question)
 
@@ -1624,36 +1619,6 @@ Return only a valid PlanSchema.
             }
 
         return None
-    def _sync_available_files(
-        self,
-        context: FinalContext | None,
-    ) -> None:
-        """Expose the current run's attachments to planning.
-
-        The Planner is constructed once per process, while attachments are
-        per-run, so the FinalContext for this run is the only place a real
-        local artifact can be discovered. Without this, every
-        file/spreadsheet/image strategy silently degrades to web search
-        because ``available_files`` stays empty. Only files the caller
-        configured and paths/filenames actually supplied by this run are
-        merged; nothing is invented.
-        """
-
-        merged: list[str] = list(self._configured_files)
-
-        items = getattr(context, "items", None) or []
-
-        for item in items:
-            candidate = getattr(item, "path", None)
-            if (
-                isinstance(candidate, str)
-                and candidate.strip()
-                and candidate not in merged
-            ):
-                merged.append(candidate)
-
-        self.available_files = merged
-
     def _classify(
         self,
         question: str,

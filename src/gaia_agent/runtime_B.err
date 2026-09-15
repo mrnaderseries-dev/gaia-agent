@@ -1,0 +1,7 @@
+Planner replan generation/validation failed: Replanned plan repeats the failed execution.
+Traceback (most recent call last):
+  File "C:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 431, in replan
+    self._validate_generated_plan(
+  File "C:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 582, in _validate_generated_plan
+    raise PlannerRecoveryRequired(
+gaia_agent.planner.planner.PlannerRecoveryRequired: Replanned plan repeats the failed execution.

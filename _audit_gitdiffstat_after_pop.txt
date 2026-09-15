@@ -1,0 +1,4 @@
+ src/gaia_agent/agents/verifier.py           |  87 +++++++++++++++
+ src/gaia_agent/planner/planner.py           | 158 ++++++++++++++++++++++++----
+ src/gaia_agent/reliability/loop_detector.py |  20 ++++
+ 3 files changed, 242 insertions(+), 23 deletions(-)

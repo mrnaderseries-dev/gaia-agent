@@ -1,0 +1,435 @@
+........................................................................ [ 26%]
+.............F...............F.....F..................s...s............. [ 52%]
+..............................................F......................... [ 78%]
+.....................................................FFFFF               [100%]
+================================== FAILURES ===================================
+__________________ test_llm_can_resolve_conflicting_evidence __________________
+
+    @pytest.mark.asyncio
+    async def test_llm_can_resolve_conflicting_evidence():
+        verifier, llm = build_verifier(
+            verified_result(
+                "42 is the final result; 43 is an intermediate calculation.",
+            ),
+        )
+    
+        request = make_input(
+            candidate_answer="42",
+            raw_data=[
+                evidence(
+                    "python_interpreter",
+                    """
+                    Calculation A = 42
+                    Calculation B = 43
+                    Final result = 42
+                    """,
+                )
+            ],
+        )
+    
+        result = await verifier.verify(request)
+    
+        assert result.status == VerificationStatus.VERIFIED
+        assert result.verified is True
+>       assert len(llm.calls) == 1
+E       assert 0 == 1
+E        +  where 0 = len([])
+E        +    where [] = <test_verifier_strong.FakeLLMClient object at 0x000001AD3A81D9A0>.calls
+
+tests\agents\test_verifier_strong.py:355: AssertionError
+___________________ test_deterministic_reason_is_preserved ____________________
+
+    @pytest.mark.asyncio
+    async def test_deterministic_reason_is_preserved():
+        verifier, llm = build_verifier(
+            verified_result(
+                "This reason should never replace the deterministic reason.",
+            ),
+        )
+    
+        request = make_input(
+            candidate_answer="42",
+            raw_data=[
+                evidence(
+                    "python_interpreter",
+                    "Final result = 42",
+                )
+            ],
+        )
+    
+        result = await verifier.verify(request)
+    
+        assert result.status == VerificationStatus.VERIFIED
+        assert result.verified is True
+    
+>       assert result.reason == (
+            "The candidate is explicitly supported by a labelled result "
+            "in strong evidence."
+        )
+E       AssertionError: assert 'The candidat...ong evidence.' == 'The candidat...ong evidence.'
+E         
+E         Skipping 42 identical leading characters in diff, use -v to show
+E         -  labelled result in strong evidence.
+E         +  labelled final result in current strong evidence.
+E         ?           ++++++         ++++++++
+
+tests\agents\test_verifier_strong.py:858: AssertionError
+__________________ test_verifier_strong_end_to_end_contract ___________________
+
+    @pytest.mark.asyncio
+    async def test_verifier_strong_end_to_end_contract():
+    
+        # ------------------------------------------------------------------
+        # Case 1: deterministic VERIFIED
+        # ------------------------------------------------------------------
+    
+        verifier, llm = build_verifier(
+            invalid_result(),
+        )
+    
+        result = await verifier.verify(
+            make_input(
+                candidate_answer="42",
+                raw_data=[
+                    evidence(
+                        "python_interpreter",
+                        "Final result = 42",
+                    )
+                ],
+            )
+        )
+    
+        assert result.status == VerificationStatus.VERIFIED
+        assert result.verified is True
+        assert len(llm.calls) == 0
+    
+        # ------------------------------------------------------------------
+        # Case 2: deterministic INVALID
+        # ------------------------------------------------------------------
+    
+        verifier, llm = build_verifier(
+            verified_result(),
+        )
+    
+        result = await verifier.verify(
+            make_input(
+                candidate_answer="42",
+                raw_data=[
+                    evidence(
+                        "python_interpreter",
+                        "Final result = 100",
+                    )
+                ],
+            )
+        )
+    
+        assert result.status == VerificationStatus.INVALID
+        assert result.verified is False
+        assert len(llm.calls) == 0
+    
+        # ------------------------------------------------------------------
+        # Case 3: conflict -> semantic verifier
+        # ------------------------------------------------------------------
+    
+        verifier, llm = build_verifier(
+            conflicting_result(
+                "The evidence contains two unresolved values.",
+            ),
+        )
+    
+        result = await verifier.verify(
+            make_input(
+                candidate_answer="42",
+                raw_data=[
+                    evidence(
+                        "python_interpreter",
+                        "Calculation A = 42; Calculation B = 43",
+                    )
+                ],
+            )
+        )
+    
+        assert result.status == VerificationStatus.CONFLICTING_EVIDENCE
+        assert result.verified is False
+        assert len(llm.calls) == 1
+    
+        # ------------------------------------------------------------------
+        # Case 4: semantic verifier resolves conflict
+        # ------------------------------------------------------------------
+    
+        verifier, llm = build_verifier(
+            verified_result(
+                "42 is explicitly marked as the final result.",
+            ),
+        )
+    
+        result = await verifier.verify(
+            make_input(
+                candidate_answer="42",
+                raw_data=[
+                    evidence(
+                        "python_interpreter",
+                        """
+                        Calculation A = 42
+                        Calculation B = 43
+                        Final result = 42
+                        """,
+                    )
+                ],
+            )
+        )
+    
+        assert result.status == VerificationStatus.VERIFIED
+        assert result.verified is True
+>       assert len(llm.calls) == 1
+E       assert 0 == 1
+E        +  where 0 = len([])
+E        +    where [] = <test_verifier_strong.FakeLLMClient object at 0x000001AD3A9182F0>.calls
+
+tests\agents\test_verifier_strong.py:1096: AssertionError
+____ test_planner_consumes_final_context_and_preserves_attachment_evidence ____
+
+    @pytest.mark.asyncio
+    async def test_planner_consumes_final_context_and_preserves_attachment_evidence():
+        client = CapturingLLM(make_final_plan())
+        planner = make_planner(client)
+    
+        context = FinalContext(
+            items=[
+                {
+                    "source_type": "attachment",
+                    "filename": "financial_report.txt",
+                    "content": "CONFIDENTIAL_REVENUE_VALUE_847291",
+                },
+            ],
+            token_count=17,
+        )
+    
+        plan = await planner.create_plan(
+            user_question="What is the revenue reported in the attached file?",
+            context=context,
+        )
+    
+>       assert isinstance(plan, PlanSchema)
+E       AssertionError: assert False
+E        +  where False = isinstance(PlanningResult(plan=PlanSchema(steps=[PlanStep(step_id=0, action='Provide the final answer using the supplied evidence... Do NOT invent a file path and do NOT retry a missing file. Use an alternative strategy (reasoning or web evidence).')), PlanSchema)
+
+tests\planner\test_planner_final_context_contract.py:91: AssertionError
+_____________________ test_planner_accepts_valid_llm_plan _____________________
+
+    @pytest.mark.asyncio
+    async def test_planner_accepts_valid_llm_plan() -> None:
+        client = AsyncMock()
+    
+        valid_plan = PlanSchema(
+            steps=[
+                make_tool_step(
+                    0,
+                    tool_name="web_search",
+                    arguments={
+                        "query": "GAIA benchmark official website",
+                    },
+                ),
+                make_final_step(1),
+            ]
+        )
+    
+        client.generate.return_value = valid_plan
+    
+        planner = make_planner(client)
+    
+        result = await planner.create_plan(
+            "What is the official website of the GAIA benchmark?"
+        )
+    
+>       assert isinstance(result, PlanSchema)
+E       AssertionError: assert False
+E        +  where False = isinstance(PlanningResult(plan=PlanSchema(steps=[PlanStep(step_id=0, action='Use web_search', step_type=<StepType.TOOL: 'tool'>, ...ormation. Use a SHORT keyword web_search query (2-8 words) built from the key entities only, never the raw question.')), PlanSchema)
+
+tests\planner\test_planner_runtime_contract.py:192: AssertionError
+____________ test_planner_recovers_from_plan_missing_final_answer _____________
+
+    @pytest.mark.asyncio
+    async def test_planner_recovers_from_plan_missing_final_answer() -> None:
+        client = AsyncMock()
+    
+        malformed_plan = PlanSchema.model_construct(
+            steps=[
+                make_tool_step(
+                    0,
+                    tool_name="web_search",
+                    arguments={
+                        "query": "GAIA benchmark",
+                    },
+                )
+            ]
+        )
+    
+        client.generate.return_value = malformed_plan
+    
+        planner = make_planner(client)
+    
+        result = await planner.create_plan(
+            "Find information about the GAIA benchmark."
+        )
+    
+>       assert isinstance(result, PlanSchema)
+E       AssertionError: assert False
+E        +  where False = isinstance(PlanningResult(plan=PlanSchema(steps=[PlanStep(step_id=0, action='Answer the user request using reasoning and supplied...soning and the available context WITHOUT web search. If no tool adds capability, use ONLY the final LLM answer step.')), PlanSchema)
+
+tests\planner\test_planner_runtime_contract.py:233: AssertionError
+------------------------------ Captured log call ------------------------------
+ERROR    gaia_agent.planner.planner:planner.py:307 Initial planner generation/validation failed: Plan must contain exactly one final-answer step.
+Traceback (most recent call last):
+  File "C:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 296, in create_plan
+    self._validate_generated_plan(
+  File "C:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 523, in _validate_generated_plan
+    self._validate_final_answer_structure(plan)
+  File "C:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 707, in _validate_final_answer_structure
+    raise ValueError(
+ValueError: Plan must contain exactly one final-answer step.
+_____________ test_planner_rejects_unknown_tool_and_uses_fallback _____________
+
+    @pytest.mark.asyncio
+    async def test_planner_rejects_unknown_tool_and_uses_fallback() -> None:
+        client = AsyncMock()
+    
+        malformed_plan = PlanSchema.model_construct(
+            steps=[
+                PlanStep(
+                    step_id=0,
+                    action="Use an unavailable tool",
+                    step_type=StepType.TOOL,
+                    tool_name="does_not_exist",
+                    arguments={},
+                    is_final_answer=False,
+                ),
+                make_final_step(1),
+            ]
+        )
+    
+        client.generate.return_value = malformed_plan
+    
+        planner = make_planner(client)
+    
+        result = await planner.create_plan(
+            "Find information about the GAIA benchmark."
+        )
+    
+>       assert isinstance(result, PlanSchema)
+E       AssertionError: assert False
+E        +  where False = isinstance(PlanningResult(plan=PlanSchema(steps=[PlanStep(step_id=0, action='Answer the user request using reasoning and supplied...soning and the available context WITHOUT web search. If no tool adds capability, use ONLY the final LLM answer step.')), PlanSchema)
+
+tests\planner\test_planner_runtime_contract.py:273: AssertionError
+------------------------------ Captured log call ------------------------------
+ERROR    gaia_agent.planner.planner:planner.py:307 Initial planner generation/validation failed: Unknown or unavailable tool: does_not_exist
+Traceback (most recent call last):
+  File "C:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 296, in create_plan
+    self._validate_generated_plan(
+  File "C:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 521, in _validate_generated_plan
+    self._validate_step(step)
+  File "C:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 650, in _validate_step
+    self._validate_tool_step(step)
+  File "C:\Users\user\gaia-agent\src\gaia_agent\planner\planner.py", line 668, in _validate_tool_step
+    raise ValueError(
+ValueError: Unknown or unavailable tool: does_not_exist
+_________________ test_planner_preserves_valid_tool_arguments _________________
+
+    @pytest.mark.asyncio
+    async def test_planner_preserves_valid_tool_arguments() -> None:
+        client = AsyncMock()
+    
+        valid_plan = PlanSchema(
+            steps=[
+                make_tool_step(
+                    0,
+                    tool_name="web_search",
+                    arguments={
+                        "query": (
+                            "highest bird species simultaneously "
+                            "on camera"
+                        ),
+                    },
+                ),
+                make_final_step(1),
+            ]
+        )
+    
+        client.generate.return_value = valid_plan
+    
+        planner = make_planner(client)
+    
+        result = await planner.create_plan(
+            "Find the highest number of bird species simultaneously "
+            "on camera."
+        )
+    
+>       assert result.steps[0].tool_name == "web_search"
+               ^^^^^^^^^^^^
+E       AttributeError: 'PlanningResult' object has no attribute 'steps'
+
+tests\planner\test_planner_runtime_contract.py:313: AttributeError
+___________ test_planner_recovery_produces_different_valid_strategy ___________
+
+    @pytest.mark.asyncio
+    async def test_planner_recovery_produces_different_valid_strategy() -> None:
+        client = AsyncMock()
+    
+        failed_step = make_tool_step(
+            0,
+            tool_name="web_search",
+            arguments={
+                "query": "GAIA benchmark",
+            },
+        )
+    
+        recovery_plan = PlanSchema(
+            steps=[
+                make_tool_step(
+                    0,
+                    tool_name="visit_webpage",
+                    arguments={
+                        "url": "https://example.com/gaia",
+                    },
+                ),
+                make_final_step(1),
+            ]
+        )
+    
+        client.generate.return_value = recovery_plan
+    
+        planner = make_planner(client)
+    
+        failure = AgentError(
+            error_type="tool_execution",
+            message=(
+                "web_search failed to retrieve useful evidence."
+            ),
+        )
+    
+        result = await planner.replan(
+            user_question="What is the GAIA benchmark?",
+            context=FinalContext(
+                items=[],
+                token_count=0,
+            ),
+            failed_step=failed_step,
+            failure=failure,
+        )
+    
+>       assert isinstance(result, PlanSchema)
+E       AssertionError: assert False
+E        +  where False = isinstance(PlanningResult(plan=PlanSchema(steps=[PlanStep(step_id=0, action='Use visit_webpage', step_type=<StepType.TOOL: 'tool'...ormation. Use a SHORT keyword web_search query (2-8 words) built from the key entities only, never the raw question.')), PlanSchema)
+
+tests\planner\test_planner_runtime_contract.py:371: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/agents/test_verifier_strong.py::test_llm_can_resolve_conflicting_evidence
+FAILED tests/agents/test_verifier_strong.py::test_deterministic_reason_is_preserved
+FAILED tests/agents/test_verifier_strong.py::test_verifier_strong_end_to_end_contract
+FAILED tests/planner/test_planner_final_context_contract.py::test_planner_consumes_final_context_and_preserves_attachment_evidence
+FAILED tests/planner/test_planner_runtime_contract.py::test_planner_accepts_valid_llm_plan
+FAILED tests/planner/test_planner_runtime_contract.py::test_planner_recovers_from_plan_missing_final_answer
+FAILED tests/planner/test_planner_runtime_contract.py::test_planner_rejects_unknown_tool_and_uses_fallback
+FAILED tests/planner/test_planner_runtime_contract.py::test_planner_preserves_valid_tool_arguments
+FAILED tests/planner/test_planner_runtime_contract.py::test_planner_recovery_produces_different_valid_strategy
+9 failed, 263 passed, 2 skipped in 5.08s

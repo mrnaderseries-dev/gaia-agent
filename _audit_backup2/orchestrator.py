@@ -243,18 +243,6 @@ class Orchestrator:
                 run.plan_runtime.completed_steps
             ),
             iteration=run.iteration,
-            # Execution projections. These are the same fields
-            # ContextRequestBuilder.from_state() populates and that
-            # RuntimeSource/HistorySource already consume; without them the
-            # plan is visible to a running step but the value a tool actually
-            # produced never is, so a final-answer step could only guess at
-            # the evidence it was supposed to report.
-            current_action=state.current_action,
-            step_type=state.step_type,
-            tool_name=state.tool_name,
-            blocked=state.blocked,
-            tool_result=state.tool_result,
-            tool_error=state.tool_error,
         )
 
         return await self.context_builder.build(
