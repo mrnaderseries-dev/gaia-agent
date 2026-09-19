@@ -1,6 +1,0 @@
-evaluator.py
-gaia.py
-run_20260903_172634.log
-submission.py
-__init__.py
-__pycache__

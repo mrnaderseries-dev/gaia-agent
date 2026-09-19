@@ -1,2 +1,0 @@
-ERROR: Invalid argument/option - 'imagename'.
-Type "TASKLIST /?" for usage.

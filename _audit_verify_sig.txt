@@ -1,2 +1,0 @@
-37:class VerificationInput(BaseModel):
-976:    async def verify(
