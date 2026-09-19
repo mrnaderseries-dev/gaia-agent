@@ -111,6 +111,8 @@ class Orchestrator:
                 reason=TransitionReason.START,
             )
 
+        self.loop_detector.reset()
+
         self._emit(
             EventType.AGENT_STARTED,
             run,
@@ -243,12 +245,6 @@ class Orchestrator:
                 run.plan_runtime.completed_steps
             ),
             iteration=run.iteration,
-            # Execution projections. These are the same fields
-            # ContextRequestBuilder.from_state() populates and that
-            # RuntimeSource/HistorySource already consume; without them the
-            # plan is visible to a running step but the value a tool actually
-            # produced never is, so a final-answer step could only guess at
-            # the evidence it was supposed to report.
             current_action=state.current_action,
             step_type=state.step_type,
             tool_name=state.tool_name,
@@ -388,15 +384,6 @@ class Orchestrator:
         run: OrchestrationContext,
         planning_result: Any,
     ) -> None:
-        # Atomic install: validate the candidate BEFORE mutating
-        # OrchestrationContext / PlanRuntime. An invalid plan must never
-        # become the active plan (no version bump, no reset, no clearing).
-        #
-        # The Planner may return either:
-        # - PlanSchema directly (from create_plan / generate_plan)
-        # - PlanningResult dataclass (with .plan and .task_analysis)
-        #
-        # Normalize to a PlanSchema for validation.
         if isinstance(planning_result, PlanSchema):
             candidate = planning_result
             task_analysis = getattr(planning_result, "task_analysis", None)
@@ -536,10 +523,6 @@ class Orchestrator:
             )
 
         run.current_attempt += 1
-
-        # Per-attempt state is a projection, not historical truth.
-        # Clear stale success/error flags before every new attempt so a
-        # retry cannot inherit the previous attempt's outcome.
         state.execution_success = False
         state.step_succeeded = False
         state.tool_error = None
@@ -881,10 +864,6 @@ class Orchestrator:
                 error=error,
                 reason=error.message,
             )
-
-        # Validate + install. replan_count is incremented ONLY after a
-        # valid replacement plan has successfully been installed, so an
-        # invalid replan leaves counters and the prior plan untouched.
         try:
             self._install_planning_result(
                 state,
@@ -1203,9 +1182,19 @@ class Orchestrator:
             return ""
 
         if isinstance(output, str):
-            return output.strip()
+            text = output.strip()
+        else:
+            text = str(output).strip().
+        marker = "final answer:"
+        index = text.lower().rfind(marker)
 
-        return str(output).strip()
+        if index != -1:
+            extracted = text[index + len(marker):].strip()
+
+            if extracted:
+                return extracted
+
+        return text
 
     @staticmethod
     def _planner_error(
@@ -1250,8 +1239,6 @@ class Orchestrator:
             AgentPhase.TERMINATED,
             AgentPhase.FAILED,
         }:
-            # AgentState is the sole owner of lifecycle transitions.
-            # Never mutate state.phase directly from orchestration.
             state.fail(
                 reason=TransitionReason.EXECUTION_FAILED,
                 fatal=state.fatal_error,

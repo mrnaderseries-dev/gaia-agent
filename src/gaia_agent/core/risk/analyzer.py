@@ -28,8 +28,6 @@ class RiskAnalyzer:
     ) -> RiskAnalysis:
 
         prompt = self._build_prompt(context)
-
-        # Fixed: Corrected the indentation to align properly inside the analyze method
         result = await self.client.generate(
             messages=[
                 {
@@ -107,6 +105,6 @@ Important:
 - Consider data modification and destructive consequences.
 - Do not invent facts.
 - Return only the required structured output.
-"""  # Removed trailing 'zabetha' string
+"""  
 
 

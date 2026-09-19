@@ -18,25 +18,6 @@ class LLMExecutionRequest:
 
 
 class LLMExecutor:
-    """
-    Executes one LLM request.
-
-    Responsibilities:
-        - validate request
-        - construct LLM messages
-        - call LLM client
-        - normalize response
-
-    Does NOT:
-        - access AgentState
-        - mutate AgentState
-        - build context
-        - plan
-        - retry
-        - recover
-        - verify
-    """
-
     def __init__(
         self,
         *,
@@ -113,7 +94,19 @@ class LLMExecutor:
                     "filler.\n"
                     "4. Do not fabricate facts.\n"
                     "5. Do not use approximate answers when "
-                    "the context contains an exact answer."
+                    "the context contains an exact answer.\n"
+                    "6. Finish your answer with the exact "
+                    "template: FINAL ANSWER: [YOUR FINAL "
+                    "ANSWER]. YOUR FINAL ANSWER must be a "
+                    "number, or as few words as possible, or "
+                    "a comma separated list of numbers and/or "
+                    "strings. If you are asked for a number, "
+                    "do not use commas to write it and do not "
+                    "add units such as $ or % unless the "
+                    "question says so. If you are asked for a "
+                    "string, do not use articles or "
+                    "abbreviations, and write digits in plain "
+                    "text."
                 ),
             },
             {

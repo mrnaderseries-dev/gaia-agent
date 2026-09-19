@@ -30,28 +30,11 @@ class StepSignature:
     exact: str
     structural: str
     semantic: str
+    arguments: str = ""
 
 
 class LoopDetector:
-    """
-    Detects repeated execution attempts at three levels:
 
-    1. EXACT
-       Same step type, tool and arguments.
-
-    2. STRUCTURAL
-       Same execution structure and strategy family.
-
-    3. SEMANTIC
-       Same underlying execution objective even when:
-         - action wording changes
-         - tool changes
-         - strategy family changes
-         - argument wording changes
-
-    The detector is intentionally deterministic.
-    It does not own planning, recovery or retry decisions.
-    """
 
     def __init__(
         self,
@@ -78,23 +61,10 @@ class LoopDetector:
         *,
         strategy_family: str,
     ) -> LoopDetection:
-        """
-        Check whether a step repeats something already executed.
-
-        Does not mutate detector history.
-        """
+      
 
         if step.is_final_answer:
-            # The mandatory final-answer step is a synthesis step: PlanSchema
-            # forces step_type=LLM, tool_name=None, arguments={}, so its
-            # EXACT signature is the constant
-            # {"arguments": {}, "step_type": "llm", "tool": ""}. Treating an
-            # answer attempt as a repeated *execution* makes every re-answer
-            # after a verification failure an unrecoverable loop, which is
-            # the opposite of the intended recovery path. check_plan() above
-            # already skips final-answer steps for the same reason, and the
-            # number of answer attempts stays bounded by the Orchestrator's
-            # verification/replan budgets rather than by this detector.
+          
             return LoopDetection(detected=False)
 
         candidate = self.signature(
@@ -113,15 +83,23 @@ class LoopDetector:
                 )
         for previous in reversed(self._history):
             if candidate.structural == previous.structural:
-                return LoopDetection(
-                    detected=True,
-                    loop_type=LoopType.STRUCTURAL,
-                    similarity=1.0,
-                    reason=(
-                        "The same execution structure and "
-                        "strategy were repeated."
-                    ),
-                )
+               
+                similarity = SequenceMatcher(
+                    None,
+                    candidate.arguments,
+                    previous.arguments,
+                ).ratio()
+
+                if similarity >= self.semantic_threshold:
+                    return LoopDetection(
+                        detected=True,
+                        loop_type=LoopType.STRUCTURAL,
+                        similarity=similarity,
+                        reason=(
+                            "The same execution structure and "
+                            "strategy were repeated."
+                        ),
+                    )
 
 
         for previous in reversed(self._history):
@@ -152,10 +130,7 @@ class LoopDetector:
     ) -> None:
 
         if step.is_final_answer:
-            # A final-answer step performs no action and produces no
-            # evidence; recording its constant signature would turn the
-            # legitimate re-synthesis of an answer into a detected loop.
-            # See check() above and check_plan().
+        
             return
 
         self._history.append(
@@ -196,12 +171,7 @@ class LoopDetector:
         *,
         strategy_family_resolver: Callable[[PlanStep], str],
     ) -> LoopDetection:
-        """
-        Detect repeated execution inside one generated plan.
-
-        The resolver belongs to the Planner/StrategySelector layer.
-        LoopDetector does not know how strategy families are calculated.
-        """
+       
 
         seen: list[StepSignature] = []
 
@@ -228,15 +198,23 @@ class LoopDetector:
                     )
 
                 if current.structural == previous.structural:
-                    return LoopDetection(
-                        detected=True,
-                        loop_type=LoopType.STRUCTURAL,
-                        similarity=1.0,
-                        reason=(
-                            "Plan contains repeated execution "
-                            "with the same strategy."
-                        ),
-                    )
+                    
+                    similarity = SequenceMatcher(
+                        None,
+                        current.arguments,
+                        previous.arguments,
+                    ).ratio()
+
+                    if similarity >= self.semantic_threshold:
+                        return LoopDetection(
+                            detected=True,
+                            loop_type=LoopType.STRUCTURAL,
+                            similarity=similarity,
+                            reason=(
+                                "Plan contains repeated execution "
+                                "with the same strategy."
+                            ),
+                        )
 
                 similarity = SequenceMatcher(
                     None,
@@ -320,6 +298,9 @@ class LoopDetector:
             ),
             semantic=self._serialize(
                 semantic_payload
+            ),
+            arguments=self._serialize(
+                normalized_arguments
             ),
         )
 

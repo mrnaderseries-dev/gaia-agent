@@ -53,12 +53,6 @@ class StrategyContext:
 
 
 class StrategySelector:
-    """Deterministic task-to-strategy selection.
-
-    This class selects a strategy family, not an arbitrary tool. The Planner
-    may still ask the LLM to construct the detailed multi-step plan, but the
-    selected family becomes a hard semantic constraint.
-    """
 
     _NON_TRANSIENT_FAILURE_MARKERS = (
         "capability",
@@ -143,12 +137,6 @@ class StrategySelector:
                 )
 
         if analysis.intent == TaskIntent.AUDIO_VIDEO:
-            # FIX: web_search is not a media capability.
-            # A video/audio task must be handled by a real media tool
-            # (for example transcript/transcription/video analysis).
-            # Falling back to web_search would let the agent answer about
-            # media it never actually inspected, which was a root cause of
-            # weak/unsupported GAIA answers.
             media_tools = (
                 "youtube_transcript",
                 "transcribe_audio",
@@ -215,11 +203,11 @@ class StrategySelector:
         failed = context.failed_strategy
 
         if any(marker in failure for marker in self._INVALID_ARGUMENT_MARKERS):
-            # Same family is legal only when the contract can be repaired.
+         
             return self.select(analysis, context)
 
         if not any(marker in failure for marker in self._NON_TRANSIENT_FAILURE_MARKERS):
-            # Unknown/permanent failures are not permission to invent a new strategy.
+           
             return None
 
         candidates: list[StrategyDecision] = []

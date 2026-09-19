@@ -79,9 +79,6 @@ class ReliabilityEngine:
             normalized_error
         )
 
-        # ---------------------------------------------------------
-        # 1. Retry has priority while retry budget remains.
-        # ---------------------------------------------------------
         if attempt < max_attempts:
             retry_decision = self.retry_policy.evaluate(
                 classification,
@@ -102,24 +99,11 @@ class ReliabilityEngine:
                     reason="Retry policy selected retry.",
                 )
 
-        # ---------------------------------------------------------
-        # 2. Ask recovery policy what should happen after
-        #    retry budget is exhausted / retry is not appropriate.
-        # ---------------------------------------------------------
+        
         recovery_decision = self.recovery_policy.evaluate(
             classification
         )
 
-        # ---------------------------------------------------------
-        # 3. REPLAN is an orchestration decision.
-        #
-        #    IMPORTANT:
-        #    Do NOT execute Recovery here.
-        #
-        #    The Orchestrator owns Planner.replan(), because it
-        #    owns plan state, context, plan version, and execution
-        #    lifecycle.
-        # ---------------------------------------------------------
         if recovery_decision.action == RecoveryAction.REPLAN:
             return ReliabilityResult(
                 action=ReliabilityAction.REPLAN,
@@ -133,10 +117,6 @@ class ReliabilityEngine:
                 ),
             )
 
-        # ---------------------------------------------------------
-        # 4. Other recovery actions may use the generic Recovery
-        #    mechanism when an operation was explicitly supplied.
-        # ---------------------------------------------------------
         if recovery_operation is not None:
             recovery_result = await self._execute_recovery(
                 error=normalized_error,
@@ -171,9 +151,7 @@ class ReliabilityEngine:
                 or "Operational recovery failed.",
             )
 
-        # ---------------------------------------------------------
-        # 5. No recovery path.
-        # ---------------------------------------------------------
+     
         return ReliabilityResult(
             action=ReliabilityAction.STOP,
             error=normalized_error,

@@ -113,12 +113,14 @@ class LLMOutputError(AgentRuntimeError):
         message: str = "LLM returned invalid output.",
         *,
         recoverable: bool = True,
+        raw_content: str | None = None,
     ) -> None:
         super().__init__(
             message,
             retryable=False,
             recoverable=recoverable,
         )
+        self.raw_content = raw_content
 
 
 class ValidationError(AgentRuntimeError):

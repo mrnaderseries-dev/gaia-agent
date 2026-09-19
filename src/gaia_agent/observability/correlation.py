@@ -44,12 +44,6 @@ def reset_correlation_id(
 def correlation_context(
     correlation_id: UUID | None = None,
 ) -> Iterator[UUID]:
-    """
-    Bind a correlation ID to the current execution context.
-
-    ContextVar makes this safe for asyncio tasks because each task
-    gets its own logical context.
-    """
     value = correlation_id or create_correlation_id()
 
     token = set_correlation_id(value)

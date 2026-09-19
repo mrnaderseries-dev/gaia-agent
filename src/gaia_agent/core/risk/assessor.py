@@ -38,6 +38,7 @@ class RiskAssessor:
 
         skip_llm = (
             rule_level is not None
+            or context.tool_name is None
             or capability
             in {
                 ToolCapability.READ_ONLY,

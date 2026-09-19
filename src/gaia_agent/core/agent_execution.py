@@ -589,10 +589,6 @@ class AgentExecution:
                     operation="execute_tool",
                     original_exception=exc,
                 ) from exc
-
-            # IMPORTANT:
-            # ToolRegistry RegisteredTool.execute()
-            # expects keyword arguments.
             result = tool.execute(
                 **dict(request.arguments)
             )

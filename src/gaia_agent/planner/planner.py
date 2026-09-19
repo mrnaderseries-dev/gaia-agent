@@ -15,6 +15,7 @@ from gaia_agent.planner.models import PlanningResult
 
 from ..planner.plan_schema import PlanSchema, PlanStep, StepType
 from ..reliability.errors import AgentError
+from ..reliability.exception import LLMOutputError
 from ..reliability.loop_detector import LoopDetector
 from ..tools.contract_validator import ToolContractValidator
 from ..tools.path_utils import is_placeholder_path
@@ -36,41 +37,7 @@ class PlannerRecoveryRequired(Exception):
 
 
 class Planner:
-    """
-    GAIA execution planner.
-
-    Strategy ownership:
-    - TaskClassifier determines what kind of task this is.
-    - StrategySelector determines which capability/strategy should solve it.
-    - Planner constructs the executable PlanSchema.
-    - SemanticPlanValidator checks semantic consistency.
-    - LoopDetector detects repetition without owning strategy policy.
-
-    Responsibilities:
-    - classify the task
-    - generate/repair a PlanSchema
-    - validate tool contracts and plan structure
-    - produce a genuinely different replan after non-transient failures
-
-    Not responsible for:
-    - tool execution
-    - retries
-    - recovery budgets
-    - verification of the final answer
-    - loop execution
-
-    Public planner contract:
-        generate_plan() -> PlanningResult
-        replan()       -> PlanningResult
-
-    PlanningResult contains:
-        - plan
-        - task_analysis
-
-    This keeps task analysis explicit and prevents downstream layers
-    from depending on mutable Planner state.
-    """
-
+  
     MAX_PLAN_STEPS = 20
     MAX_CONTEXT_ITEMS = 10
 
@@ -81,7 +48,21 @@ class Planner:
         "analyze_excel": "FILE_ANALYSIS",
         "file_reader": "FILE_READER",
         "python_interpreter": "PYTHON",
+        "youtube_transcript": "AUDIO_VIDEO",
+        "transcribe_audio": "AUDIO_VIDEO",
+        "video_reader": "AUDIO_VIDEO",
+        "audio_reader": "AUDIO_VIDEO",
+        "analyze_video": "AUDIO_VIDEO",
     }
+    _MEDIA_TOOLS = (
+        "youtube_transcript",
+        "transcribe_audio",
+        "video_reader",
+        "audio_reader",
+        "analyze_video",
+    )
+
+    _YOUTUBE_URL_MARKERS = ("youtube.com", "youtu.be")
 
     _FILE_PATH_ARGUMENT_TOOLS = {
         "file_reader": ("file_path",),
@@ -306,6 +287,42 @@ class Planner:
                 task_analysis=analysis,
             )
 
+        except LLMOutputError as exc:
+            # Attempt structured-output repair before falling back
+            raw_content = getattr(exc, "raw_content", None)
+            if raw_content:
+                logger.info(
+                    "Attempting structured-output repair for plan generation"
+                )
+                repaired_plan = self._repair_and_validate_plan(
+                    raw_content, analysis=analysis
+                )
+                if repaired_plan is not None:
+                    return PlanningResult(
+                        plan=repaired_plan,
+                        task_analysis=analysis,
+                    )
+
+            logger.exception(
+                "Initial planner generation/validation failed: %s",
+                exc,
+            )
+
+            fallback = self._emergency_fallback_plan(
+                user_question=user_question,
+                analysis=analysis,
+            )
+
+            self._validate_generated_plan(
+                fallback,
+                analysis=analysis,
+            )
+
+            return PlanningResult(
+                plan=fallback,
+                task_analysis=analysis,
+            )
+
         except Exception as exc:
             logger.exception(
                 "Initial planner generation/validation failed: %s",
@@ -332,12 +349,6 @@ class Planner:
         user_question: str,
         context: FinalContext | None = None,
     ) -> PlanningResult:
-        """
-        Public initial-planning contract.
-
-        Always returns PlanningResult rather than exposing a mutable
-        Planner-side task-analysis state.
-        """
         return await self.create_plan(
             user_question=user_question,
             context=context,
@@ -351,12 +362,6 @@ class Planner:
         failed_step: PlanStep,
         failure: AgentError,
     ) -> PlanStep:
-        """
-        Compatibility helper for callers that only need the first
-        replacement step.
-
-        The canonical replan contract remains PlanningResult.
-        """
         result = await self.replan(
             user_question=user_question,
             context=context,
@@ -942,6 +947,21 @@ class Planner:
                         arguments={"code": code},
                     )
 
+        if analysis.intent == TaskIntent.AUDIO_VIDEO:
+            media_tool = self._media_tool_for_url(question)
+
+            if media_tool:
+                return self._tool_and_final_plan(
+                    action=(
+                        "Fetch the video transcript and extract "
+                        "the requested detail"
+                    ),
+                    tool_name=media_tool,
+                    arguments={
+                        "video_url": self._extract_url(question),
+                    },
+                )
+
         if analysis.intent == TaskIntent.URL_PAGE:
             url = self._extract_url(question)
 
@@ -1020,6 +1040,21 @@ class Planner:
                         arguments={"code": code},
                     )
 
+        if analysis.intent == TaskIntent.AUDIO_VIDEO:
+            media_tool = self._media_tool_for_url(user_question)
+
+            if media_tool and failed_tool != media_tool:
+                return self._tool_and_final_plan(
+                    action=(
+                        "Fetch the video transcript and extract "
+                        "the requested detail"
+                    ),
+                    tool_name=media_tool,
+                    arguments={
+                        "video_url": self._extract_url(user_question),
+                    },
+                )
+
         if analysis.intent == TaskIntent.URL_PAGE:
             url = self._extract_url(user_question)
 
@@ -1069,6 +1104,87 @@ class Planner:
                 )
 
         return self._llm_only_plan()
+
+    def _repair_and_validate_plan(
+        self,
+        raw_content: str,
+        *,
+        analysis: TaskAnalysis,
+    ) -> PlanSchema | None:
+        import json
+
+        try:
+            parsed = json.loads(raw_content)
+        except json.JSONDecodeError:
+            return None
+
+        if isinstance(parsed, list):
+            parsed = {"steps": parsed}
+
+        if not isinstance(parsed, dict):
+            return None
+
+        steps = parsed.get("steps")
+        if not isinstance(steps, list):
+            return None
+
+        available_tool_names = list(self.available_tools.keys())
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            if (
+                step.get("step_type") == "tool"
+                and step.get("tool_name") in (None, "", "null", "none")
+            ):
+                action_text = step.get("action", "").lower()
+                matches = [
+                    name for name in available_tool_names if name.lower() in action_text
+                ]
+                if len(matches) == 1:
+                    step["tool_name"] = matches[0]
+                else:
+                    # Cannot safely determine the intended tool
+                    logger.debug(
+                        "Cannot infer tool_name for step: action=%r matches=%r",
+                        step.get("action"),
+                        matches,
+                    )
+                    return None
+
+        try:
+            plan = PlanSchema.model_validate(parsed)
+        except Exception as exc:
+            logger.debug("Repaired plan failed validation: %s", exc)
+            return None
+
+        try:
+            self._validate_generated_plan(plan, analysis=analysis)
+        except Exception as exc:
+            logger.debug("Repaired plan failed planner validation: %s", exc)
+            return None
+
+        logger.info("Structured-output repair succeeded")
+        return plan
+
+    def _required_output_shape(self) -> str:
+        return """
+REQUIRED OUTPUT SHAPE (mandatory, follow it literally):
+{
+  "steps": [
+    {"step_id": 0, "action": "<one concrete action>", "step_type": "tool",
+     "tool_name": "<exact listed tool name>", "arguments": {"<arg>": "<value>"},
+     "is_final_answer": false},
+    {"step_id": 1, "action": "Synthesize the final answer using only the evidence obtained.",
+     "step_type": "llm", "tool_name": null, "arguments": {},
+     "is_final_answer": true}
+  ]
+}
+- The LAST step is ALWAYS that "llm" step with "is_final_answer": true.
+- A plan whose last step is a "tool" step is invalid and is rejected.
+- If no tool is needed, emit ONLY the single "llm" step above with
+  "step_id": 0.
+""".strip()
+
     def _build_initial_prompt(
         self,
         *,
@@ -1119,6 +1235,8 @@ RULES:
 13. Final-answer step is an LLM step and MUST be last.
 14. Never use a final step to hide a failed tool call.
 15. Return only a valid PlanSchema.
+
+{self._required_output_shape()}
 """.strip()
 
     def _build_replan_prompt(
@@ -1215,6 +1333,8 @@ REPLANNING RULES:
 14. Exactly one final-answer step; it must be last and must be
     an LLM step.
 15. Return only a valid PlanSchema.
+
+{self._required_output_shape()}
 """.strip()
 
     def _system_prompt(self) -> str:
@@ -1628,16 +1748,7 @@ Return only a valid PlanSchema.
         self,
         context: FinalContext | None,
     ) -> None:
-        """Expose the current run's attachments to planning.
-
-        The Planner is constructed once per process, while attachments are
-        per-run, so the FinalContext for this run is the only place a real
-        local artifact can be discovered. Without this, every
-        file/spreadsheet/image strategy silently degrades to web search
-        because ``available_files`` stays empty. Only files the caller
-        configured and paths/filenames actually supplied by this run are
-        merged; nothing is invented.
-        """
+       
 
         merged: list[str] = list(self._configured_files)
 
@@ -1670,12 +1781,7 @@ Return only a valid PlanSchema.
         self,
         step: PlanStep,
     ) -> str:
-        """
-        Resolve strategy family without adding it to PlanStep.
-        Strategy family is derived from Planner/strategy metadata.
-        LoopDetector receives this resolver instead of maintaining
-        its own strategy mapping, preventing multiple sources of truth.
-        """
+       
         if step.step_type == StepType.LLM:
             return "LLM"
 
@@ -1688,9 +1794,7 @@ Return only a valid PlanSchema.
         self,
         step: PlanStep,
     ) -> str:
-        """
-        Backward-compatible wrapper for existing Planner callers.
-        """
+       
         return self.strategy_family(step)
     def _fingerprint_step(
         self,
@@ -1713,12 +1817,7 @@ Return only a valid PlanSchema.
         self,
         failure: AgentError,
     ) -> str:
-        """
-        Extract a stable failure type from AgentError.
-
-        Supports the current canonical AgentError contract while
-        remaining tolerant of older failure_type/error_type fields.
-        """
+      
         for attr in (
             "failure_type",
             "error_type",
@@ -1802,6 +1901,31 @@ Return only a valid PlanSchema.
             if match
             else None
         )
+
+    def _media_tool_for_url(
+        self,
+        question: str,
+    ) -> str | None:
+      
+
+        url = self._extract_url(question)
+
+        if not url:
+            return None
+
+        lowered = url.lower()
+
+        if not any(
+            marker in lowered
+            for marker in self._YOUTUBE_URL_MARKERS
+        ):
+            return None
+
+        for tool in self._MEDIA_TOOLS:
+            if tool == "youtube_transcript" and tool in self.available_tools:
+                return tool
+
+        return None
 
     def _build_search_query(
         self,
@@ -1976,17 +2100,6 @@ def detect_factorial_ratio(
 def detect_simple_operation(
     user_question: str,
 ) -> str | None:
-    """Planner-local arithmetic detector (canonical implementation).
-
-    Delegates to the canonical task-classifier detector so the Planner
-    and TaskClassifier can never disagree about which expression a
-    question contains. The canonical detector requires an explicit
-    "what is" form and therefore returns None for bare multi-term
-    prompts; in that case fall back to extracting the full trailing
-    arithmetic expression (e.g. "25 * 17 + 43") rather than only the
-    first two-operand pair.
-    """
-
     canonical = _canonical_simple_operation(user_question)
     if canonical is not None:
         return canonical
@@ -2031,15 +2144,6 @@ def _extract_full_arithmetic_expression(
 def _deterministic_text_code(
     user_question: str,
 ) -> str | None:
-    """Deterministic code for quoted-literal text transformations.
-
-    Only handles an explicitly quoted literal (single or double quotes)
-    so the planner never invents the operand. The literal is embedded
-    with json.dumps, and the operation is restricted to the small set
-    the classifier already treats as TEXT_TRANSFORMATION intent
-    (reverse / uppercase / lowercase / length / sort letters).
-    """
-
     text = user_question or ""
     lowered = text.lower()
     match = re.search(r'"([^"]+)"', text)

@@ -26,7 +26,7 @@ class Recovery:
             error_handler or ErrorHandler()
         )
 
-    def init(
+    def __init__(
         self,
         *,
         error_handler: ErrorHandler | None = None,

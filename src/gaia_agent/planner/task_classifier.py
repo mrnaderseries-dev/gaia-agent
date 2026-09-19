@@ -34,10 +34,25 @@ _TEXT_TRANSFORM_KEYWORDS = (
     "lowercase", "capitalize", "palindrome", "transposition",
 )
 
+
+_OUTPUT_ORDER_DIRECTIVE_RE = re.compile(
+    r"\bin\s+(?:reverse\s+|non[- ]?decreasing\s+|non[- ]?increasing\s+)?"
+    r"(?:alphabetical|alphabetic|chronological|numerical|ascending|"
+    r"descending)\s+order\b"
+    r"|\balphabetically\s+ordered\b",
+    re.IGNORECASE,
+)
+
+_LOGIC_STRUCTURE_KEYWORDS = (
+    "commutative", "commutativity", "counter-example", "counterexample",
+    "counter example", "associative", "associativity", "truth table",
+    "abelian", "semigroup",
+)
+
 _FILE_KEYWORDS = (
     "file", "attachment", "attached", "spreadsheet", "excel", "csv",
     "workbook", "xlsx", "dataset", "data file", "table in the file",
-    "these files",
+    "these files", "pdf", "document",
 )
 
 _IMAGE_KEYWORDS = (
@@ -50,6 +65,17 @@ _AUDIO_VIDEO_KEYWORDS = (
     "video", "audio", "mp3", "mp4", "recording", "podcast", "listen",
     "voice memo", "song", "youtube", "youtu.be", "transcript",
 )
+
+
+_MEDIA_TOOLS = (
+    "youtube_transcript",
+    "transcribe_audio",
+    "video_reader",
+    "audio_reader",
+    "analyze_video",
+)
+
+_YOUTUBE_URL_MARKERS = ("youtube.com", "youtu.be")
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +189,10 @@ class TaskClassifier:
         has_excel = "analyze_excel" in available
         has_reader = "file_reader" in available
         has_image = "analyze_image" in available
+        media_tool = next(
+            (tool for tool in _MEDIA_TOOLS if tool in available),
+            None,
+        )
 
        
         if (
@@ -185,9 +215,29 @@ class TaskClassifier:
                 ),
             )
 
+        if any(keyword in text for keyword in _LOGIC_STRUCTURE_KEYWORDS):
+            return TaskAnalysis(
+                intent=TaskIntent.ARITHMETIC,
+                needs_external_info=False,
+                recommended_first_tool=(
+                    "python_interpreter" if has_python else None
+                ),
+                forbidden_tools=("web_search", "visit_webpage"),
+                analysis_text=(
+                    "The task is a finite logical/algebraic verification "
+                    "(e.g. counter-examples for a property of a defined "
+                    "structure such as an operation table). Enumerate ALL "
+                    "cases exhaustively with a python_interpreter step "
+                    "(standard library only) instead of reasoning in "
+                    "prose. Web search cannot help."
+                ),
+            )
+
+        transform_text = _OUTPUT_ORDER_DIRECTIVE_RE.sub(" ", text)
+
         if (
             any(
-                keyword in text
+                keyword in transform_text
                 for keyword in _TEXT_TRANSFORM_KEYWORDS
             )
             or any(
@@ -252,6 +302,8 @@ class TaskClassifier:
             has_web=has_web,
             has_visit=has_visit,
             has_image=has_image,
+            has_python=has_python,
+            media_tool=media_tool,
         )
 
 
@@ -262,6 +314,8 @@ def _classify_media_and_web(
     has_web: bool,
     has_visit: bool,
     has_image: bool,
+    has_python: bool = False,
+    media_tool: str | None = None,
 ) -> TaskAnalysis:
     
     if any(keyword in text for keyword in _IMAGE_KEYWORDS):
@@ -282,6 +336,22 @@ def _classify_media_and_web(
 
    
     if any(keyword in text for keyword in _AUDIO_VIDEO_KEYWORDS):
+        if media_tool is not None:
+            return TaskAnalysis(
+                intent=TaskIntent.AUDIO_VIDEO,
+                needs_external_info=True,
+                recommended_first_tool=media_tool,
+                forbidden_tools=(),
+                analysis_text=(
+                    "The task involves AUDIO/VIDEO and a media-grounding "
+                    f"tool is registered. Ground the answer in the media "
+                    f"itself: the first evidence step must call "
+                    f"{media_tool} with the exact media URL/artifact. Do "
+                    "NOT answer about the media from web snippets that "
+                    "merely describe it."
+                ),
+            )
+
         return TaskAnalysis(
             intent=TaskIntent.AUDIO_VIDEO,
             needs_external_info=True,
@@ -307,6 +377,20 @@ def _classify_media_and_web(
             "youtube.com" in target.lower()
             or "youtu.be" in target.lower()
         ):
+            if media_tool is not None:
+                return TaskAnalysis(
+                    intent=TaskIntent.AUDIO_VIDEO,
+                    needs_external_info=True,
+                    recommended_first_tool=media_tool,
+                    forbidden_tools=(),
+                    analysis_text=(
+                        "The task references a YouTube video. Fetch the "
+                        f"video transcript with {media_tool} using the "
+                        "exact URL instead of relying on web snippets "
+                        "about the video."
+                    ),
+                )
+
             return TaskAnalysis(
                 intent=TaskIntent.AUDIO_VIDEO,
                 needs_external_info=True,
@@ -317,8 +401,10 @@ def _classify_media_and_web(
                 analysis_text=(
                     "The task references a YouTube video. Visiting "
                     "YouTube via visit_webpage usually fails with "
-                    "403/consent walls. Prefer a focused web_search "
-                    "for the specific fact asked about this video."
+                    "403/consent walls, and no media tool is "
+                    "registered, so the only remaining option is a "
+                    "focused web_search for the specific fact asked "
+                    "about this video."
                 ),
             )
         if has_visit:
@@ -354,6 +440,21 @@ def _classify_media_and_web(
             ),
         )
 
+    if _looks_quantitative_word_problem(text) and has_python:
+        return TaskAnalysis(
+            intent=TaskIntent.ARITHMETIC,
+            needs_external_info=False,
+            recommended_first_tool="python_interpreter",
+            forbidden_tools=("web_search", "visit_webpage"),
+            analysis_text=(
+                "The task is a quantitative word problem with "
+                "multiple numbers requiring computation. Compute "
+                "the exact result with a python_interpreter step "
+                "(standard library only). Never use web_search "
+                "for arithmetic."
+            ),
+        )
+
     if _looks_factual(text):
         return TaskAnalysis(
             intent=TaskIntent.FACTUAL_SEARCH,
@@ -369,6 +470,7 @@ def _classify_media_and_web(
                 "question."
             ),
         )
+
     return TaskAnalysis(
         intent=TaskIntent.SELF_CONTAINED,
         needs_external_info=False,
@@ -391,6 +493,53 @@ def _has_digit_or_math(text: str) -> bool:
             for symbol in ("+", "-", "*", "x", "÷", "/")
         )
     )
+
+
+_QUANTITATIVE_WORD_PROBLEM_MARKERS = (
+    "average",
+    "total",
+    "per ",
+    "each",
+    "altogether",
+    "combined",
+    "remaining",
+    "left over",
+    "difference",
+    "sum",
+    "product",
+    "ratio",
+    "percent",
+    "percentage",
+    "discount",
+    "profit",
+    "loss",
+    "interest",
+    "speed",
+    "distance",
+    "area",
+    "volume",
+    "cost",
+    "price",
+)
+
+
+def _looks_quantitative_word_problem(text: str) -> bool:
+    numbers = re.findall(r"\d+(?:\.\d+)?", text)
+    if len(numbers) < 2:
+        return False
+    if any(
+        marker in text
+        for marker in (
+            "river", "mountain", "tallest", "longest", "capital",
+            "president", "born", "founded", "country", "city",
+            "population", "meters tall", "feet tall", "longer",
+            "taller", "older", "deeper", "how many",
+        )
+    ):
+        return False
+    if not any(marker in text for marker in _QUANTITATIVE_WORD_PROBLEM_MARKERS):
+        return False
+    return True
 
 
 def _looks_factual(text: str) -> bool:

@@ -87,9 +87,7 @@ class TerminationPolicy:
                 reason=TerminationReason.COMPLETED,
             )
 
-        # Bounded verification: if the answer exists but semantic
-        # verification kept failing, deliver it honestly as
-        # UNVERIFIED rather than looping regenerate->verify forever.
+     
         if (
             state.final_answer_ready
             and state.verification_attempts

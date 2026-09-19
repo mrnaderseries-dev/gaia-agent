@@ -27,9 +27,7 @@ from gaia_agent.reliability.policies.recovery_policy import RecoveryPolicy
 
 async def create_agent() -> AgentLoop:
 
-    # ==========================================================
-    # Infrastructure
-    # ==========================================================
+  
 
     llm_client = ...
     llm_model = ...
@@ -42,9 +40,6 @@ async def create_agent() -> AgentLoop:
 
     token_tracker = ...
 
-    # ==========================================================
-    # Policies
-    # ==========================================================
 
     execution_policy = ...
     risk_assessor = ...
@@ -53,10 +48,6 @@ async def create_agent() -> AgentLoop:
     termination_policy = TerminationPolicy(
         max_iterations=20
     )
-
-    # ==========================================================
-    # Context
-    # ==========================================================
 
     context_policy = ...
     context_budget = ...
@@ -79,15 +70,9 @@ async def create_agent() -> AgentLoop:
         runtime_source=runtime_source,
     )
 
-    # ==========================================================
-    # Planner
-    # ==========================================================
+    
 
     planner = ...
-
-    # ==========================================================
-    # Reliability
-    # ==========================================================
 
     error_handler = ErrorHandler()
 
@@ -115,9 +100,6 @@ async def create_agent() -> AgentLoop:
         recovery=recovery,
     )
 
-    # ==========================================================
-    # AgentExecution
-    # ==========================================================
 
     async def llm_executor(
         state: AgentState,
@@ -136,22 +118,13 @@ async def create_agent() -> AgentLoop:
         token_tracker=token_tracker,
     )
 
-    # ==========================================================
-    # Verifier
-    # ==========================================================
 
     verifier = ...
     answer_sanitizer = ...
 
-    # ==========================================================
-    # Loop Detector
-    # ==========================================================
 
     loop_detector = ...
 
-    # ==========================================================
-    # Orchestrator
-    # ==========================================================
 
     orchestrator = Orchestrator(
         context_builder=context_builder,
@@ -167,9 +140,6 @@ async def create_agent() -> AgentLoop:
         tracer=tracer,
     )
 
-    # ==========================================================
-    # Agent Loop
-    # ==========================================================
 
     return AgentLoop(
         orchestrator=orchestrator,

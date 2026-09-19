@@ -5,7 +5,8 @@ import re
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
 
 from gaia_agent.llm.client import LLMClient
 
@@ -21,14 +22,79 @@ class VerificationStatus(str, Enum):
     FAIL = "invalid"
     UNCERTAIN = "insufficient_evidence"
 
+    @classmethod
+    def _synonym_label(cls, normalized: str) -> "VerificationStatus | None":
+        synonyms = {
+            "pass": cls.VERIFIED,
+            "supported": cls.VERIFIED,
+            "correct": cls.VERIFIED,
+            "true": cls.VERIFIED,
+            "yes": cls.VERIFIED,
+            "fail": cls.INVALID,
+            "failed": cls.INVALID,
+            "incorrect": cls.INVALID,
+            "wrong": cls.INVALID,
+            "false": cls.INVALID,
+            "no": cls.INVALID,
+            "uncertain": cls.INSUFFICIENT_EVIDENCE,
+            "unknown": cls.INSUFFICIENT_EVIDENCE,
+            "unsure": cls.INSUFFICIENT_EVIDENCE,
+            "not_enough_information": cls.INSUFFICIENT_EVIDENCE,
+            "insufficient": cls.INSUFFICIENT_EVIDENCE,
+            "cannot_determine": cls.INSUFFICIENT_EVIDENCE,
+            "conflict": cls.CONFLICTING_EVIDENCE,
+            "conflicting": cls.CONFLICTING_EVIDENCE,
+            "contradictory": cls.CONFLICTING_EVIDENCE,
+        }
+        return synonyms.get(normalized)
+
+    @classmethod
+    def resolve_label(cls, value: object) -> "VerificationStatus | None":
+    
+        if isinstance(value, str):
+            normalized = (
+                value.strip().lower().replace("-", "_").replace(" ", "_")
+            )
+            if not normalized:
+                return None
+            member = cls._value2member_map_.get(normalized)
+            if member is not None:
+                return member
+            return cls._synonym_label(normalized)
+        return None
+
+    @classmethod
+    def _missing_(cls, value: object) -> "VerificationStatus | None":
+       
+        if isinstance(value, str):
+            normalized = (
+                value.strip().lower().replace("-", "_").replace(" ", "_")
+            )
+            return cls._synonym_label(normalized) if normalized else None
+        return None
+
 
 class VerificationResult(BaseModel):
     status: VerificationStatus | None = None
     verified: bool | None = None
     reason: str = ""
 
+    @field_validator("status", mode="before")
+    @classmethod
+    def _normalize_status_label(cls, value: Any) -> Any:
+      
+        resolved = VerificationStatus.resolve_label(value)
+        return resolved if resolved is not None else value
+
     @model_validator(mode="after")
     def normalize(self) -> "VerificationResult":
+    
+        if self.status is None and self.verified is not None:
+            self.status = (
+                VerificationStatus.VERIFIED
+                if self.verified
+                else VerificationStatus.INVALID
+            )
         if self.status is not None:
             self.verified = self.status == VerificationStatus.VERIFIED
         return self

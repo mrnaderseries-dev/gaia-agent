@@ -104,6 +104,53 @@ class PlanStep(BaseModel):
 class PlanSchema(BaseModel):
     steps: list[PlanStep] = Field(min_length=1)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_model_output(cls, data: Any) -> Any:
+        if isinstance(data, list):
+            data = {"steps": data}
+
+        if not isinstance(data, dict):
+            return data
+
+        steps = data.get("steps")
+        if not isinstance(steps, list):
+            return data
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            if (
+                step.get("is_final_answer") is True
+                and step.get("step_type") == "tool"
+                and step.get("tool_name") in (None, "", "null", "none")
+            ):
+                step["step_type"] = "llm"
+                step["tool_name"] = None
+                step["arguments"] = {}
+
+        ids: list[int] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                return data
+            raw_id = step.get("step_id")
+            if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                return data
+            ids.append(raw_id)
+
+        if len(set(ids)) != len(ids):
+            return data
+
+        if ids != list(range(len(ids))):
+            rekeyed = []
+            for position, step in enumerate(steps):
+                fixed = dict(step)
+                fixed["step_id"] = position
+                rekeyed.append(fixed)
+            data = dict(data)
+            data["steps"] = rekeyed
+
+        return data
+
     @field_validator("steps")
     @classmethod
     def validate_steps(

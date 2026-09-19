@@ -9,18 +9,9 @@ from .task_classifier import TaskAnalysis, TaskIntent
 
 
 class SemanticPlanError(ValueError):
-    """Raised when a structurally valid plan is semantically wrong."""
-
 
 class SemanticPlanValidator:
-    """Validate semantic correctness after structural PlanSchema validation.
-
-    Structural validation answers whether a plan is syntactically valid.
-    This validator answers whether that valid plan actually matches the
-    classified task and selected strategy. Strategy-family resolution is
-    deliberately delegated to Planner/StrategySelector so this class does
-    not maintain a second source of truth.
-    """
+  
 
     def validate(
         self,
@@ -41,6 +32,17 @@ class SemanticPlanValidator:
                 analysis=analysis,
                 strategy=strategy,
                 available_files=available_files,
+            )
+
+
+        if (
+            analysis.intent == TaskIntent.AUDIO_VIDEO
+            and strategy.deterministic
+            and strategy.primary_tool
+        ):
+            self._require_media_grounding(
+                plan,
+                expected=strategy.primary_tool,
             )
 
         if failed_strategy and failure_type:
@@ -104,6 +106,24 @@ class SemanticPlanValidator:
                 raise SemanticPlanError(
                     f"{analysis.intent.value} requires strategy tool '{expected}', got '{tool}'."
                 )
+
+    @staticmethod
+    def _require_media_grounding(
+        plan: PlanSchema,
+        *,
+        expected: str,
+    ) -> None:
+        used = {
+            step.tool_name
+            for step in plan.steps
+            if step.step_type == StepType.TOOL and not step.is_final_answer
+        }
+
+        if expected not in used:
+            raise SemanticPlanError(
+                "AUDIO_VIDEO tasks must ground the answer in the media "
+                f"itself with '{expected}'; this plan never calls it."
+            )
 
     @staticmethod
     def _has_image(files: Sequence[str]) -> bool:

@@ -261,15 +261,12 @@ class OllamaClient(LLMClient):
     ) -> T:
         if not isinstance(content, str):
             raise LLMOutputError(
-                "Structured Ollama response content must be a string."
+                "Structured Ollama response content must be a string.",
+                raw_content=str(content) if content is not None else None,
             )
 
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise LLMOutputError(
-                "Ollama returned invalid JSON for structured output."
-            ) from exc
+        raw_content = content
+        parsed = self._load_json_payload(content)
 
         if not issubclass(output_schema, BaseModel):
             raise TypeError(
@@ -280,5 +277,27 @@ class OllamaClient(LLMClient):
             return output_schema.model_validate(parsed)
         except ValidationError as exc:
             raise LLMOutputError(
-                "Ollama structured output failed schema validation."
+                "Ollama structured output failed schema validation.",
+                raw_content=raw_content,
+            ) from exc
+
+    @staticmethod
+    def _load_json_payload(content: str) -> Any:
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            stripped = content.strip()
+            if "```" in stripped:
+                lines = stripped.splitlines()
+                if lines and lines[0].strip().startswith("```"):
+                    lines = lines[1:]
+                while lines and lines[-1].strip().startswith("```"):
+                    lines = lines[:-1]
+                fenced = "\n".join(lines).strip()
+                try:
+                    return json.loads(fenced)
+                except json.JSONDecodeError:
+                    pass
+            raise LLMOutputError(
+                "Ollama returned invalid JSON for structured output."
             ) from exc

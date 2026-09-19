@@ -290,12 +290,7 @@ class AgentState:
         )
 
     def complete(self) -> StateTransition:
-        """Transition to COMPLETED only after verification has passed.
-
-        Completion is a lifecycle fact, not a convenience flag.  The
-        caller must establish the verification gate before invoking this
-        method.
-        """
+    
         if not self.final_answer_verified:
             raise AgentError(
                 error_type="CompletionWithoutVerification",
