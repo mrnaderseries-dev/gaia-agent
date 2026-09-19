@@ -39,6 +39,14 @@
     "task": "Who is the current Chief Executive Officer of the Mozilla Foundation? Verify with a web search.",
     "attach": []
   },
+  "R_broken_xlsx": {
+    "task": "Read the attached spreadsheet and tell me the total written in it.",
+    "attach": ["C:\\Users\\user\\gaia-agent\\_audit_data\\broken.xlsx"]
+  },
+  "J2_vision_big": {
+    "task": "Analyze the attached image and tell me the number written on it.",
+    "attach": ["C:\\Users\\user\\gaia-agent\\_audit_data\\answer_big.png"]
+  },
   "I_file": {
     "task": "Read the attached file and tell me the total number of data rows it contains.",
     "attach": ["C:\\Users\\user\\gaia-agent\\_audit_data\\sales.csv"]

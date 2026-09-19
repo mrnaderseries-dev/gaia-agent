@@ -20,7 +20,7 @@ class FileReaderTool(Tool):
     name = "file_reader"
 
     description = (
-        "Read local text, markdown, CSV, JSON, or configuration "
+        "Read local text, markdown, CSV, JSON, PDF, or configuration "
         "files securely and handle multi-format file evaluation tasks."
     )
 
@@ -120,6 +120,9 @@ class FileReaderTool(Tool):
                     "is not a valid file."
                 )
 
+            if path.suffix.lower() == ".pdf":
+                return self._read_pdf(path, file_path)
+
             content = None
 
             for encoding in (
@@ -148,6 +151,44 @@ class FileReaderTool(Tool):
 
             return content
 
+        except Exception as exc:
+            return (
+                f"Error reading file '{file_path}': "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    @staticmethod
+    def _read_pdf(path: Path, file_path: str) -> str:
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:
+            return (
+                f"Error reading file '{file_path}': "
+                f"PDF support requires 'pypdf' ({exc})."
+            )
+
+        try:
+            reader = PdfReader(str(path))
+            parts: list[str] = []
+            for page in reader.pages:
+                try:
+                    text = page.extract_text() or ""
+                except Exception:
+                    text = ""
+                if text.strip():
+                    parts.append(text.strip())
+            content = "\n\n".join(parts).strip()
+            if not content:
+                return (
+                    f"Error: PDF '{file_path}' contains no "
+                    "extractable text."
+                )
+            if len(content) > 100_000:
+                content = content[:100_000] + (
+                    "\n\n[file content truncated because it "
+                    "exceeded the character limit]"
+                )
+            return content
         except Exception as exc:
             return (
                 f"Error reading file '{file_path}': "

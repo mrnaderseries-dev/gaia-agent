@@ -1,0 +1,3 @@
+{"index": 1, "task": "Calculate 2 + 2.", "answer": "4", "verified": true, "phase": "completed", "tool_error": null, "replans": 0, "iterations": 3}
+{"index": 2, "task": "Calculate 3 + 3.", "answer": "6", "verified": true, "phase": "completed", "tool_error": null, "replans": 0, "iterations": 3}
+{"index": 3, "task": "Calculate 5 + 5.", "answer": "10", "verified": true, "phase": "completed", "tool_error": null, "replans": 0, "iterations": 3}

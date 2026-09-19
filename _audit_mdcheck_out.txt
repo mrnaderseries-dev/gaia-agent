@@ -1,0 +1,72 @@
+bytes: 57797
+lines: 812
+--- H1/H2 sections ---
+# GAIA Architecture Analysis
+## Session Start
+## Objective
+## Architecture Audit
+## Runtime Validation
+## Repository Mapping (Hypothesis Verification Phase — MAPPING ONLY, no changes)
+### Planner
+### Replan Fingerprint
+### Duplicate Detection
+### Loop Detection
+### Verification
+### Ollama
+### Call chain (verified from source)
+## FINAL READINESS AUDIT — 2026-09-15 (part 1: truth + tasks A/B)
+## FINAL-pt2 (tests, perf, output contract)
+# GAIA READINESS GATE
+## Blocking Issues (must fix before HF eval)
+## Non-Blocking Issues
+## Capability Gaps
+## Model Limitations
+## Runtime Evidence
+## Test Evidence
+## Hugging Face Readiness Matrix
+## Final Decision
+## Hypothesis Verification (MAPPING PHASE — no code changes)
+### Current Hypothesis
+### Evidence For
+### Evidence Against
+### Still Unknown
+### Required Probes (not yet run)
+## Session Continuation — 2026-09-15 (audit + verified runtime)
+### Entry state
+### Phase 1 audit (actual source)
+### Hypothesis -> CONFIRMED
+### Fix 2 — provenance-aware numeric verification
+### Validation 2026-09-15
+## Fixes (continued)
+### Fix 1 — Replan fingerprint rejects the mandatory final-answer step
+## Remaining Issues
+## Modified Files
+## Final Status
+# FINAL READINESS AUDIT — 2026-09-16 (session 3)
+## Current truth (re-established, not inherited)
+## Baseline proof for the 9 failing contract tests
+## Task A — multi-term arithmetic (`Calculate 25 * 17 + 43`), expect 468
+### LoopDetector constant-signature defect (evidence)
+## Task B — deterministic text transform (`Reverse the string "architecture"`)
+## Task C — multi-number reasoning (warehouse bottles, expect 88)
+## Context propagation defect: tool results never reach the final-answer step
+## Pre-fix batch progress (evidence log)
+## Pre-fix results for the remaining representative tasks
+## Fixes applied in this session (smallest correct layer, no redesign)
+### Fix 5 — execution projections were never put into the context request
+### Fix 6 — a final-answer step is not a repeatable execution (LoopDetector)
+### Fix 7 — the run's attachments never reached the Planner
+## Regression evidence for the fixes
+## §8 triage of the previously documented 9 failures
+### Fix 8 — LoopDetector history leaked across runs/questions
+## Post-fix runtime validation (same tasks, same harness)
+## 5. Hugging Face GAIA Unit 4 readiness matrix
+## GAIA READINESS GATE
+### Blocking Issues
+### Non-Blocking Issues
+### Capability Gaps
+### Model Limitations
+### Runtime Evidence
+### Test Evidence
+### Hugging Face Readiness Matrix
+### Final Decision

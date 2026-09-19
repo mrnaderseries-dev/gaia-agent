@@ -1,0 +1,7 @@
+﻿
+Path                    
+----                    
+C:\Users\user\gaia-agent
+
+
+alive 2026-09-18T12:14:19.6786731+03:00

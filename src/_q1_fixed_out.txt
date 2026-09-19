@@ -1,0 +1,5 @@
+[cfg] fetching official questions from the scoring API ...
+[cfg] fetched 20 official questions
+[cfg] limited to the first 1 question(s)
+[1/1] 8e867cd7-cff9-4e6c-867a-ff5ddc2550be answer='3' elapsed=594.4s error=None
+[summary] answered=1/1 results=evaluation_runs\official_20260918_q1_fixed\evaluation_results.json course_rows=evaluation_runs\official_20260918_q1_fixed\course_submission.json

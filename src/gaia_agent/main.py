@@ -5,9 +5,6 @@ import sys
 from uuid import uuid4
 
 
-# ============================================================================
-# STDOUT / STDERR UTF-8
-# ============================================================================
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(
@@ -22,9 +19,6 @@ if hasattr(sys.stderr, "reconfigure"):
     )
 
 
-# ============================================================================
-# AGENT COMPONENTS
-# ============================================================================
 
 from gaia_agent.agents.verifier import VerifierAgent
 
@@ -82,31 +76,28 @@ from gaia_agent.reliability.retry import Retry
 
 from gaia_agent.tools.registry import ToolRegistry
 
+from gaia_agent.config import settings
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 
 TEXT_MODEL = LLMModel(
     provider="ollama",
     model="qwen2.5:3b",
-    max_tokens=768,
+ 
+    max_tokens=1024,
     temperature=0.2,
 )
 
 VISION_MODEL = LLMModel(
     provider="ollama",
-    model="gemma3",
+    model="moondream",
     max_tokens=768,
     temperature=0.0,
 )
 
 
-# ============================================================================
-# AGENT FACTORY
-# ============================================================================
 
 
 async def create_agent() -> AgentLoop:
@@ -118,27 +109,19 @@ async def create_agent() -> AgentLoop:
     Runtime responsibilities stay inside their dedicated layers.
     """
 
-    # ========================================================================
-    # OBSERVABILITY
-    # ========================================================================
 
     event_logger = EventLogger()
     metrics = Metrics()
     tracer = Tracer()
     token_tracker = TokenTracker()
 
-    # ========================================================================
-    # OLLAMA CLIENT
-    # ========================================================================
-
     llm_client = OllamaClient(
         base_url=OLLAMA_BASE_URL,
+        timeout=settings.ollama_timeout,
         token_tracker=token_tracker,
     )
 
-    # ========================================================================
-    # LLM SERVICES
-    # ========================================================================
+    
 
     text_llm_service = LLMService(
         client=llm_client,
@@ -150,9 +133,6 @@ async def create_agent() -> AgentLoop:
         model=VISION_MODEL,
     )
 
-    # ========================================================================
-    # TOOL REGISTRY
-    # ========================================================================
 
     tool_registry = ToolRegistry(
         base_dir=".",
@@ -169,15 +149,9 @@ async def create_agent() -> AgentLoop:
         for spec in tool_registry.get_tool_specs()
     }
 
-    # ========================================================================
-    # EXECUTION POLICY
-    # ========================================================================
 
     execution_policy = ExecutionPolicy()
 
-    # ========================================================================
-    # RISK
-    # ========================================================================
 
     risk_rules = RiskRules(
         tool_registry=tool_registry,
@@ -193,24 +167,15 @@ async def create_agent() -> AgentLoop:
         analyzer=risk_analyzer,
     )
 
-    # ========================================================================
-    # APPROVAL
-    # ========================================================================
 
     approval_policy = ApprovalPolicy()
 
-    # ========================================================================
-    # TERMINATION POLICY
-    # ========================================================================
 
     termination_policy = TerminationPolicy(
         max_iterations=20,
         max_verification_attempts=2,
     )
 
-    # ========================================================================
-    # CONTEXT
-    # ========================================================================
 
     context_policy = ContextPolicy(
         include_memory=False,
@@ -247,17 +212,11 @@ async def create_agent() -> AgentLoop:
         runtime_source=RuntimeSource(),
     )
 
-    # ========================================================================
-    # LOOP DETECTOR
-    # ========================================================================
 
     loop_detector = LoopDetector(
         max_history=50,
     )
 
-    # ========================================================================
-    # PLANNER
-    # ========================================================================
 
     planner = Planner(
         client=llm_client,
@@ -266,9 +225,6 @@ async def create_agent() -> AgentLoop:
         loop_detector=loop_detector,
     )
 
-    # ========================================================================
-    # RELIABILITY
-    # ========================================================================
 
     error_handler = ErrorHandler()
 
@@ -299,18 +255,12 @@ async def create_agent() -> AgentLoop:
         recovery=recovery,
     )
 
-    # ========================================================================
-    # LLM EXECUTOR
-    # ========================================================================
 
     llm_executor = LLMExecutor(
         client=llm_client,
         model=TEXT_MODEL,
     )
 
-    # ========================================================================
-    # AGENT EXECUTION
-    # ========================================================================
 
     agent_execution = AgentExecution(
         tool_registry=tool_registry,
@@ -326,18 +276,12 @@ async def create_agent() -> AgentLoop:
         correlation_id=uuid4(),
     )
 
-    # ========================================================================
-    # VERIFIER
-    # ========================================================================
 
     verifier = VerifierAgent(
         client=llm_client,
         model=TEXT_MODEL,
     )
 
-    # ========================================================================
-    # OBSERVABILITY FACADE
-    # ========================================================================
 
     observability = ObservabilityFacade(
         event_logger=event_logger,
@@ -345,9 +289,6 @@ async def create_agent() -> AgentLoop:
         metrics=metrics,
     )
 
-    # ========================================================================
-    # ORCHESTRATOR
-    # ========================================================================
 
     orchestrator = Orchestrator(
         context_builder=context_builder,
@@ -364,9 +305,6 @@ async def create_agent() -> AgentLoop:
         ),
     )
 
-    # ========================================================================
-    # AGENT LOOP
-    # ========================================================================
 
     return AgentLoop(
         orchestrator=orchestrator,
@@ -374,9 +312,6 @@ async def create_agent() -> AgentLoop:
     )
 
 
-# ============================================================================
-# DIAGNOSTIC HELPERS
-# ============================================================================
 
 
 def print_transition_history(state: AgentState) -> None:
@@ -596,21 +531,12 @@ def print_final_report(state: AgentState) -> None:
     print("=" * 70)
 
 
-# ============================================================================
-# MAIN
-# ============================================================================
 
 
 async def main(
     user_request: str = "Calculate 2 + 2.",
 ) -> AgentState:
-    """
-    Real application entrypoint.
-
-    Default request is deliberately simple so that the first real smoke
-    test validates local Ollama + Planner + AgentExecution + Tool + LLM +
-    Verification without depending on external web services.
-    """
+  
 
     print()
     print("=" * 70)
@@ -664,9 +590,6 @@ async def main(
         raise
 
 
-# ============================================================================
-# SCRIPT ENTRYPOINT
-# ============================================================================
 
 
 if __name__ == "__main__":

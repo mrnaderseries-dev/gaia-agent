@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     db_pool_max_size: int = 10
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:3b"
+    # Per-request HTTP timeout for Ollama. The previous hardcoded 120 s was
+    # repeatedly exceeded by real planner/replan/verifier calls on ~10k-char
+    # prompts with a local CPU model (httpx.ReadTimeout at 121 s), which turned
+    # every such question into a wasted budget rather than a generation.
+    ollama_timeout: float = 300.0
     agent_max_iterations: int = 20
     context_max_tokens: int = 12000
     log_level: str = "INFO"

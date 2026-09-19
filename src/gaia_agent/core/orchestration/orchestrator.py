@@ -1184,7 +1184,7 @@ class Orchestrator:
         if isinstance(output, str):
             text = output.strip()
         else:
-            text = str(output).strip().
+            text = str(output).strip()
         marker = "final answer:"
         index = text.lower().rfind(marker)
 
